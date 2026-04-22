@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "video-maker-auto"
+version = "1.0.0"
+description = "Combine a static image + audio into a YouTube-optimized MP4 video."
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow>=11.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+video-maker = "video_maker.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["video_maker*"]
