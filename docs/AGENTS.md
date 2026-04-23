@@ -15,6 +15,7 @@ Ce document decrit l'architecture et les conventions du projet video-maker-auto 
 ```
 video_maker/
 ├── __init__.py      # Vide, marque le package
+├── __main__.py      # Active `python -m video_maker` (appelle cli.main())
 ├── cli.py           # Point d'entree CLI, sous-commandes: single, batch
 ├── encoder.py       # Logique metier: validation, preparation image, encodage ffmpeg, batch
 └── settings.py      # Presets qualite (1080p/4k), config encoding YouTube, TypedDict QualityPreset
@@ -30,26 +31,35 @@ Image + Audio
   -> output.mp4
 ```
 
+La commande ffmpeg utilise `-map 0:v:0 -map 1:a:0` pour lier l’image bouclee au flux video et **uniquement le premier flux audio** du fichier audio. Les fichiers M4A/MP3 avec pochette embarquee en flux MJPEG ne perturbent plus la selection de flux.
+
 L'image est pretraitee par Pillow : redimensionnement + letterboxing sur fond noir. Le filtre ffmpeg `-vf` n'est plus utilise (supprime pour eviter le double traitement).
 
 ### Mode batch
 
-```
-input_dir/
-  -> scan pour cover.* (image)
-  -> scan pour fichiers audio (trie par nom)
-  -> pour chaque audio: encode_video()
-  -> BatchResult(successes, failures)
-```
+Fichier optionnel : `tracks.json` (nom defini par `TRACKS_MANIFEST_FILENAME` dans `settings.py`).
 
-`batch_encode()` retourne un `BatchResult` (dataclass) avec `successes: list[Path]` et `failures: list[tuple[Path, str]]`. Les fichiers en echec sont listes avec la raison.
+**Resolution des paires** (`_resolve_track_pairs` dans `encoder.py`) :
+
+1. **Manifest valide** : `tracks` est une liste non vide. Chaque entree a au minimum `audio` (chemin relatif sous `input_dir`). Champs optionnels : `image`, `output`. Cle racine optionnelle : `default_cover`. Les entrees dont le champ `audio` est absent, vide, hors de `input_dir`, ou avec une extension non supportee sont **silencieusement ignorees** (aucune pre-failure, aucun avertissement).
+2. **Image par piste** (ordre de priorite) : `image` sur la piste, puis `default_cover`, puis image avec le **meme stem** que l’audio, puis `cover.*` (`--cover-name`, defaut `cover`).
+3. **Sans manifest**, **JSON invalide**, ou **`tracks` n'est pas une liste** : avertissement stderr, scan de tous les fichiers audio (tries), meme logique d'image sans le manifest.
+4. **Securite** : les chemins du manifest sont resolus sous `input_dir` (pas d’`..` sortant du dossier) via `_file_in_input_dir` / `_is_under_dir`.
+
+Types :
+
+- `TrackItem` : `audio_path`, `image_path`, `output_filename` (basename `.mp4`).
+- `BatchResult` : `successes`, `failures` (echecs d’encodage **et** pistes sans image assignee).
+
+`batch_encode()` : construit des `TrackItem`, enchaine `encode_video()`, retourne `BatchResult`. Les echecs « pas d’image » sont enregistres dans `failures` sans tenter l’encodage.
 
 ### Gestion des erreurs
 
 - `encode_video()` leve des exceptions (jamais `sys.exit`).
-- `validate_inputs()` leve `FileNotFoundError` ou `ValueError`.
+- `validate_inputs()` leve `FileNotFoundError` (absent) ou `ValueError` (dossier, extension invalide).
+- `_prepare_image()` leve `ValueError` pour dimensions nulles. Les erreurs PIL (image corrompue) sont wrappees en `ValueError` par `encode_video()`.
 - Si ffmpeg n'est pas installe : `RuntimeError`.
-- `batch_encode()` leve `FileNotFoundError` si le dossier n'existe pas, `NotADirectoryError` si le chemin n'est pas un repertoire.
+- `batch_encode()` leve `FileNotFoundError` / `NotADirectoryError` si le dossier d'entree est invalide ; leve `ValueError` si deux pistes produiraient le **meme nom de sortie** ; leve `FileNotFoundError` si aucun job n'est possible (tracks vide, pas d'audio, pas d'image). Si toutes les pistes echouent par manque d'image, retourne `BatchResult` avec `successes=[]` et `failures` rempli.
 - La CLI (`cli.py`) catche ces exceptions et retourne un code de sortie (0 ou 1).
 
 ### Repertoire temporaire
@@ -62,26 +72,29 @@ input_dir/
 
 - `QualityPreset` : TypedDict avec `resolution`, `video_bitrate`, `frame_rate`.
 - `QUALITY_PRESETS` : dictionnaire de presets (`"1080p"`, `"4k"`).
-- `ENCODING_SETTINGS` : parametres constants du codec (H.264 High, AAC 48kHz, yuv420p, faststart).
+- `ENCODING_SETTINGS` : parametres constants du codec (H.264 High, AAC 48kHz, yuv420p, faststart). Cles notables : `preset: "slow"` (encodage lent/haute qualite) et l'option ffmpeg `-tune stillimage` (optimisation pour image fixe). Modifier `preset` vers `"medium"` ou `"fast"` reduit le temps d'encodage au detriment du ratio qualite/taille.
 - `SUPPORTED_*_EXTENSIONS` : sets d'extensions valides.
 
 Pour ajouter une nouvelle qualite (ex. 1440p), ajouter une entree dans `QUALITY_PRESETS`.
 
 ### Encoder (`encoder.py`)
 
-- `resolve_quality()` : retourne un `QualityPreset`. Leve `ValueError` si inconnu.
-- `validate_inputs()` : leve `FileNotFoundError` ou `ValueError`.
-- `_prepare_image(path, work_dir, resolution)` : retourne le chemin de l'image preparee. Si deja a la bonne taille, retourne le chemin original. Utilise un context manager `with Image.open(...)` pour eviter les fuites de descripteurs de fichier.
+- `resolve_quality()` : retourne un `QualityPreset`. Leve `ValueError` si inconnu. La fonction est insensible a la casse (`"1080P"`, `"4K"` acceptes). Attention : la CLI utilise `argparse choices` qui est case-sensitive ; seuls `"1080p"` et `"4k"` sont acceptes en ligne de commande.
+- `validate_inputs()` : utilise `is_file()` (rejette les dossiers, les symlinks cassés, les fichiers absents). Leve `FileNotFoundError` si absent, `ValueError` si c'est un dossier ou une extension non supportee.
+- `_prepare_image(path, work_dir, resolution)` : retourne le chemin de l'image preparee. Si deja a la bonne taille, retourne le chemin original. Leve `ValueError` pour une image de dimensions nulles (`0×0`). Les erreurs PIL (`UnidentifiedImageError`, `OSError`) sont capturees dans `encode_video()` et converties en `ValueError("Cannot read image …")`.
 - `encode_video()` : accepte `quality` (str) OU des overrides manuels (`resolution`, `video_bitrate`, `frame_rate`). Les overrides ont priorite sur le preset.
 - `BatchResult` : dataclass avec `successes: list[Path]` et `failures: list[tuple[Path, str]]`.
-- `batch_encode()` : scan un dossier, matching par stem du fichier image (`cover_name`). Retourne un `BatchResult`.
+- `batch_encode()` : s'appuie sur `_resolve_track_pairs()` (manifest, name-match, cover). Retourne un `BatchResult`. Leve `ValueError` sur noms de sortie dupliques. Leve `FileNotFoundError` pour dossier invalide / vide d'audios. Un batch entierement sans piste valide retourne uniquement des echecs.
+- `_resolve_track_pairs()` : retourne `(list[TrackItem], list[tuple[Path, str]], mode)` avec `mode` in `("manifest", "scan")`.
+- `_normalize_output_name(name)` : ajoute `.mp4` au champ `output` du manifest si absent ou si l'extension n'est pas `.mp4`.
 
 ### CLI (`cli.py`)
 
 - Sous-commandes : `single` et `batch`.
 - `main()` retourne un int (0 = succes, 1 = erreur).
-- La resolution manuelle est en format `WxH`.
-- En mode batch, retourne 1 si au moins un fichier a echoue.
+- `--resolution WxH`, `--bitrate`, `--fps` sont disponibles **uniquement en mode `single`**. Le mode `batch` n'expose que `-q`/`--quality`, `-o`/`--output-dir` (defaut : `<input_dir>/output`) et `--cover-name`.
+- `_parse_resolution()` rejette les valeurs non positives (`0x1080`, `-1x1080` → `None`).
+- En mode `batch`, retourne 1 si au moins un fichier a echoue.
 
 ### Tests
 
@@ -94,6 +107,7 @@ Pour ajouter une nouvelle qualite (ex. 1440p), ajouter une entree dans `QUALITY_
 
 - `Pillow>=11.0` : manipulation d'images (resize, canvas, sauvegarde).
 - `pytest>=8.0` : framework de test (dev dependency).
+- `pyproject.toml` definit l'entry point `video-maker = "video_maker.cli:main"` (installable via `pip install -e .` ; commande `video-maker` disponible en PATH).
 
 ## Points d'extension connus
 

@@ -8,14 +8,18 @@ from unittest.mock import patch, MagicMock
 import pytest
 from PIL import Image
 
+import json
+
 from video_maker.encoder import (
     validate_inputs,
     _prepare_image,
+    _resolve_track_pairs,
     encode_video,
     batch_encode,
     resolve_quality,
     BatchResult,
 )
+from video_maker.settings import TRACKS_MANIFEST_FILENAME
 from video_maker.settings import QUALITY_PRESETS
 
 
@@ -36,6 +40,11 @@ def test_resolve_quality_4k() -> None:
 def test_resolve_quality_invalid() -> None:
     with pytest.raises(ValueError, match="Unknown quality"):
         resolve_quality("720p")
+
+
+def test_resolve_quality_case_insensitive() -> None:
+    assert resolve_quality("1080P")["resolution"] == (1920, 1080)
+    assert resolve_quality("4K")["resolution"] == (3840, 2160)
 
 
 # --- validate_inputs ---
@@ -66,6 +75,20 @@ def test_validate_inputs_bad_audio_extension(tmp_image: Path, tmp_path: Path) ->
     bad_audio.write_bytes(b"\x00")
     with pytest.raises(ValueError, match="Unsupported audio format"):
         validate_inputs(tmp_image, bad_audio)
+
+
+def test_validate_inputs_image_is_directory(tmp_path: Path, tmp_audio: Path) -> None:
+    d = tmp_path / "notafile.jpg"
+    d.mkdir()
+    with pytest.raises(ValueError, match="not a file"):
+        validate_inputs(d, tmp_audio)
+
+
+def test_validate_inputs_audio_is_directory(tmp_image: Path, tmp_path: Path) -> None:
+    d = tmp_path / "notafile.mp3"
+    d.mkdir()
+    with pytest.raises(ValueError, match="not a file"):
+        validate_inputs(tmp_image, d)
 
 
 # --- _prepare_image ---
@@ -107,6 +130,30 @@ def test_prepare_image_4k_resolution(tmp_path: Path) -> None:
     assert prepared.size == (3840, 2160)
 
 
+def test_prepare_image_corrupt_raises(tmp_path: Path, tmp_audio: Path) -> None:
+    bad_img = tmp_path / "corrupt.jpg"
+    bad_img.write_bytes(b"not an image at all \x00\x01\x02")
+    with pytest.raises(ValueError, match="Cannot read image"):
+        with patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
+            encode_video(bad_img, tmp_audio, tmp_path / "out.mp4")
+
+
+def test_prepare_image_zero_dimension_raises(tmp_path: Path) -> None:
+    """_prepare_image must raise ValueError for degenerate 0-dimension images."""
+    bad = tmp_path / "zero.png"
+    # Create a valid 1x1 image and patch Image.open to return a zero-size mock
+    with patch("video_maker.encoder.Image.open") as mock_open:
+        mock_img = MagicMock()
+        mock_img.width = 0
+        mock_img.height = 0
+        mock_img.convert.return_value = mock_img
+        mock_open.return_value.__enter__ = lambda s: mock_img
+        mock_open.return_value.__exit__ = MagicMock(return_value=False)
+        mock_img.size = (0, 0)
+        with pytest.raises(ValueError, match="invalid dimensions"):
+            _prepare_image(bad, tmp_path, (1920, 1080))
+
+
 def test_prepare_image_taller_than_16_9(tmp_path: Path) -> None:
     img = Image.new("RGB", (500, 2000), (0, 0, 255))
     path = tmp_path / "tall.png"
@@ -131,6 +178,10 @@ def test_encode_video_success(tmp_image: Path, tmp_audio: Path, tmp_path: Path, 
 
     cmd = mock_run.call_args[0][0]
     assert cmd[0] == "ffmpeg"
+    map_at = [i for i, x in enumerate(cmd) if x == "-map"]
+    assert len(map_at) == 2
+    assert cmd[map_at[0] + 1] == "0:v:0"
+    assert cmd[map_at[1] + 1] == "1:a:0"
     assert "libx264" in cmd
     assert "aac" in cmd
     assert "-shortest" in cmd
@@ -187,8 +238,11 @@ def test_batch_encode_no_cover(tmp_path: Path) -> None:
     audio_dir.mkdir()
     (audio_dir / "song.mp3").write_bytes(b"\x00")
 
-    with pytest.raises(FileNotFoundError, match="No cover image"):
-        batch_encode(audio_dir, tmp_path / "out")
+    result = batch_encode(audio_dir, tmp_path / "out")
+    assert len(result.successes) == 0
+    assert len(result.failures) == 1
+    assert result.failures[0][0].name == "song.mp3"
+    assert "No image" in result.failures[0][1]
 
 
 def test_batch_encode_no_audio(tmp_path: Path) -> None:
@@ -238,3 +292,109 @@ def test_batch_encode_partial_failure(batch_dir: Path, tmp_path: Path) -> None:
     assert len(result.successes) == 2
     assert len(result.failures) == 1
     assert result.failures[0][0].suffix in {".mp3", ".wav", ".flac"}
+
+
+# --- _resolve_track_pairs ---
+
+def test_resolve_track_pairs_name_match_and_cover_fallback(tmp_path: Path) -> None:
+    (tmp_path / "cover.png").write_bytes(b"png")
+    (tmp_path / "a.mp3").write_bytes(b"\x00")
+    (tmp_path / "b.mp3").write_bytes(b"\x00")
+    img = Image.new("RGB", (10, 10), (1, 2, 3))
+    img.save(tmp_path / "b.png")
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "scan"
+    assert len(pre) == 0
+    assert len(items) == 2
+    by_stem = {i.audio_path.stem: i for i in items}
+    assert by_stem["a"].image_path.name == "cover.png"
+    assert by_stem["b"].image_path.name == "b.png"
+
+
+def test_resolve_track_pairs_manifest_per_track_image(tmp_path: Path) -> None:
+    (tmp_path / "cover.png").write_bytes(b"png")
+    (tmp_path / "x.mp3").write_bytes(b"\x00")
+    img = Image.new("RGB", (5, 5), (9, 9, 9))
+    img.save(tmp_path / "art.png")
+    manifest = {
+        "default_cover": "cover.png",
+        "tracks": [
+            {"audio": "x.mp3", "image": "art.png", "output": "outvid"},
+        ],
+    }
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "manifest"
+    assert pre == []
+    assert len(items) == 1
+    assert items[0].output_filename == "outvid.mp4"
+    assert items[0].image_path.name == "art.png"
+
+
+def test_resolve_track_pairs_manifest_default_cover(tmp_path: Path) -> None:
+    (tmp_path / "d.jpg").write_bytes(b"jpg")
+    (tmp_path / "s.mp3").write_bytes(b"\x00")
+    manifest = {
+        "default_cover": "d.jpg",
+        "tracks": [{"audio": "s.mp3"}],
+    }
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "manifest"
+    assert len(items) == 1
+    assert items[0].image_path.name == "d.jpg"
+
+
+def test_resolve_track_pairs_manifest_no_image_pre_failure(tmp_path: Path) -> None:
+    (tmp_path / "s.mp3").write_bytes(b"\x00")
+    manifest = {"tracks": [{"audio": "s.mp3"}]}
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "manifest"
+    assert len(items) == 0
+    assert len(pre) == 1
+    assert pre[0][0].name == "s.mp3"
+
+
+def test_resolve_track_pairs_empty_tracks_json(tmp_path: Path) -> None:
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text(
+        json.dumps({"tracks": []}), encoding="utf-8"
+    )
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "manifest"
+    assert items == [] and pre == []
+
+
+def test_batch_encode_duplicate_output_raises(tmp_path: Path) -> None:
+    (tmp_path / "cover.png").write_bytes(b"x")
+    (tmp_path / "a.mp3").write_bytes(b"\x00")
+    (tmp_path / "b.mp3").write_bytes(b"\x00")
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "tracks": [
+                    {"audio": "a.mp3", "output": "same"},
+                    {"audio": "b.mp3", "output": "same"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Duplicate output name"):
+        batch_encode(tmp_path, tmp_path / "out")
+
+
+def test_resolve_track_pairs_invalid_json_falls_back_to_scan(tmp_path: Path) -> None:
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text("{ not json", encoding="utf-8")
+    (tmp_path / "cover.png").write_bytes(b"x")
+    (tmp_path / "a.mp3").write_bytes(b"\x00")
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "scan"
+    assert len(items) == 1
+    assert items[0].image_path.name == "cover.png"

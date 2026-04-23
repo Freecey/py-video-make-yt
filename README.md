@@ -56,7 +56,7 @@ python -m video_maker single -i artwork.png -a podcast.wav -o my_video.mp4
 
 ### Batch — encode a full album
 
-Put audio files + a `cover.*` image in one folder:
+**Default:** put audio files + a `cover.*` image in one folder. **Per-track art:** if an image has the same **stem** as an audio file (e.g. `01-intro.mp3` + `01-intro.png`), that image is used for that track. **Optional `tracks.json`:** if present and valid JSON, the `tracks` list defines each job (per-track `image`, optional `default_cover`, optional `output` filename). See [docs/README.md](docs/README.md) for the full format.
 
 ```
 my_album/
@@ -112,7 +112,7 @@ output/
 ## Supported formats
 
 - **Image** — jpg, jpeg, png, bmp, webp, tiff
-- **Audio** — mp3, wav, aac, m4a, ogg, flac, wma
+- **Audio** — mp3, wav, aac, m4a, ogg, opus, flac, wma
 
 ## Run tests
 

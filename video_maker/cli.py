@@ -23,7 +23,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     single.add_argument("-i", "--image", type=Path, required=True,
                         help="Path to the image file (jpg, png, bmp, webp, tiff).")
     single.add_argument("-a", "--audio", type=Path, required=True,
-                        help="Path to the audio file (mp3, wav, aac, m4a, ogg, flac, wma).")
+                        help="Path to the audio file (mp3, wav, aac, m4a, ogg, opus, flac, wma).")
     single.add_argument("-o", "--output", type=Path, default=None,
                         help="Output video path. Defaults to <audio_name>.mp4 in current directory.")
     single.add_argument("-q", "--quality", type=str, default="1080p",
@@ -37,9 +37,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help=f"Override frame rate (default from preset).")
 
     # --- batch mode ---
-    batch = sub.add_parser("batch", help="Encode multiple audio files from a folder using one cover image.")
-    batch.add_argument("input_dir", type=Path,
-                       help="Folder containing audio files and a cover image (cover.*).")
+    batch = sub.add_parser(
+        "batch",
+        help=(
+            "Encode many audios: optional tracks.json (per-track image + output), "
+            "or folder scan (same-stem image per audio, else cover.*)."
+        ),
+    )
+    batch.add_argument(
+        "input_dir",
+        type=Path,
+        help=(
+            "Folder with audio files. If tracks.json exists and is valid JSON, use it; "
+            "otherwise process all audios in order. Cover (see --cover-name) is the fallback image."
+        ),
+    )
     batch.add_argument("-o", "--output-dir", type=Path, default=None,
                        help="Output folder for videos. Defaults to <input_dir>/output.")
     batch.add_argument("-q", "--quality", type=str, default="1080p",
@@ -58,9 +70,12 @@ def _parse_resolution(resolution_str: str | None) -> tuple[int, int] | None:
     if len(parts) != 2:
         return None
     try:
-        return (int(parts[0]), int(parts[1]))
+        w, h = int(parts[0]), int(parts[1])
     except ValueError:
         return None
+    if w <= 0 or h <= 0:
+        return None
+    return (w, h)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                 quality=args.quality,
                 image_name=args.cover_name,
             )
-        except (FileNotFoundError, NotADirectoryError) as exc:
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         return 0 if not result.failures else 1
@@ -84,7 +99,11 @@ def main(argv: list[str] | None = None) -> int:
         output_path = args.output or Path.cwd() / f"{args.audio.stem}.mp4"
         resolution = _parse_resolution(args.resolution)
         if args.resolution and resolution is None:
-            print("Error: --resolution must be in WxH format (e.g. 1920x1080).", file=sys.stderr)
+            print(
+                "Error: --resolution must be in WxH format with positive values "
+                "(e.g. 1920x1080).",
+                file=sys.stderr,
+            )
             return 1
 
         try:
@@ -105,9 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
-    # No subcommand: show help
+    # No subcommand: show help and exit
     parse_args(["--help"])
-    return 0
 
 
 if __name__ == "__main__":

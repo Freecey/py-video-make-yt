@@ -70,7 +70,9 @@ python -m video_maker single -i cover.jpg -a song.mp3 \
 
 ## Traiter un album complet (batch)
 
-Placer tous les fichiers dans un meme dossier avec une image de couverture nommee `cover.*` :
+### Mode simple : une image pour tout le dossier
+
+Mettre une couverture globale `cover.*` et les fichiers audio dans le meme dossier :
 
 ```
 mon_album/
@@ -80,13 +82,46 @@ mon_album/
 └── 03-derniere-piste.flac
 ```
 
-Lancer la commande batch :
-
 ```bash
 python -m video_maker batch mon_album/
 ```
 
-Les videos sont generees dans `mon_album/output/`.
+Sortie par defaut : `mon_album/output/*.mp4`.
+
+### Une image par morceau (meme nom que l’audio)
+
+Sans fichier manifest : pour chaque fichier audio, si une image porte le **meme nom** (sans extension), elle est utilisee a la place du `cover` global.
+
+```
+mon_album/
+├── cover.jpg              # utilise pour les pistes sans image dediee
+├── 01-intro.mp3
+├── 01-intro.png           # utilise pour 01-intro.mp3
+├── 02-track.mp3
+└── 02-track.jpg           # utilise pour 02-track.mp3
+```
+
+### Manifest `tracks.json` (controle fin)
+
+Si un fichier `tracks.json` est present **et** que le JSON est valide, la liste `tracks` definit l’ordre et les paires audio / image. Les fichiers audio qui ne sont pas dans cette liste ne sont pas traites.
+
+Exemple :
+
+```json
+{
+  "default_cover": "cover.jpg",
+  "tracks": [
+    { "audio": "01-intro.mp3", "image": "art-intro.png" },
+    { "audio": "02-mid.mp3" },
+    { "audio": "03-outro.mp3", "image": "art-outro.jpg", "output": "fin" }
+  ]
+}
+```
+
+- `image` : optionnel ; sinon `default_cover`, puis une image au meme nom que l’audio, puis `cover.*` (`--cover-name`).
+- `output` : optionnel ; nom du fichier video (`.mp4` ajoute si absent). Par defaut : `<nom du fichier audio>.mp4`.
+
+Si `tracks.json` est absent ou JSON invalide, un message d’avertissement s’affiche et le mode **scan du dossier** (tous les audios) est utilise.
 
 ### Options batch
 
@@ -97,9 +132,13 @@ python -m video_maker batch mon_album/ -q 4k
 # Dossier de sortie personnalise
 python -m video_maker batch mon_album/ -o /tmp/videos
 
-# Image de couverture avec un autre nom
+# Image de couverture par defaut (fallback) avec un autre nom
 python -m video_maker batch mon_album/ --cover-name artwork
 ```
+
+### Comportement en cas d’erreur (batch)
+
+Si un morceau n’a **aucune** image resolue (ni par `tracks.json`, ni par nom, ni `cover.*`), il est signale dans la sortie et compte comme echec ; les autres morceaux peuvent quand meme etre encodes.
 
 ## Ce que fait l'outil avec votre image
 
@@ -114,4 +153,4 @@ L'image est **automatiquement redimensionnee** pour correspondre a la resolution
 | Type | Extensions |
 |------|-----------|
 | Image | .jpg, .jpeg, .png, .bmp, .webp, .tiff |
-| Audio | .mp3, .wav, .aac, .m4a, .ogg, .flac, .wma |
+| Audio | .mp3, .wav, .aac, .m4a, .ogg, .opus, .flac, .wma |

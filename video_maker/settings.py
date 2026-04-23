@@ -11,8 +11,11 @@ class QualityPreset(TypedDict):
     frame_rate: int
 
 
-SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".aac", ".m4a", ".ogg", ".flac", ".wma"}
+SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".aac", ".m4a", ".ogg", ".opus", ".flac", ".wma"}
 SUPPORTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+
+# Batch mode: optional manifest listing audio + image per track
+TRACKS_MANIFEST_FILENAME = "tracks.json"
 
 QUALITY_PRESETS: dict[str, QualityPreset] = {
     "1080p": {

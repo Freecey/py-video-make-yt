@@ -75,6 +75,13 @@ def test_parse_resolution_non_numeric() -> None:
     assert _parse_resolution("abcxdef") is None
 
 
+def test_parse_resolution_zero_or_negative() -> None:
+    assert _parse_resolution("0x1080") is None
+    assert _parse_resolution("1920x0") is None
+    assert _parse_resolution("-1920x1080") is None
+    assert _parse_resolution("1920x-1080") is None
+
+
 # --- main: single ---
 
 def test_main_single_success(tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock) -> None:
