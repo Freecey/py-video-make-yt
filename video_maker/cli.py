@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                 video_bitrate=args.bitrate,
                 frame_rate=args.fps,
             )
-        except (FileNotFoundError, ValueError) as exc:
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         except RuntimeError as exc:

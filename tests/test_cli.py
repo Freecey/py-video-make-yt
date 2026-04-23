@@ -129,6 +129,20 @@ def test_main_single_ffmpeg_fails(tmp_image: Path, tmp_audio: Path, tmp_path: Pa
     assert ret == 1
 
 
+def test_main_single_output_parent_is_file(tmp_image: Path, tmp_audio: Path, tmp_path: Path) -> None:
+    """main single must return 1 with clean error when output parent path is an existing file."""
+    blocker = tmp_path / "notadir"
+    blocker.write_text("i am a file")
+    with patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
+        ret = main([
+            "single",
+            "-i", str(tmp_image),
+            "-a", str(tmp_audio),
+            "-o", str(blocker / "video.mp4"),
+        ])
+    assert ret == 1
+
+
 def test_main_single_no_ffmpeg(tmp_image: Path, tmp_audio: Path, tmp_path: Path) -> None:
     with patch("video_maker.encoder.shutil.which", return_value=None):
         ret = main([

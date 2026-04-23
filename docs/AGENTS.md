@@ -39,12 +39,47 @@ L'image est pretraitee par Pillow : redimensionnement + letterboxing sur fond no
 
 Fichier optionnel : `tracks.json` (nom defini par `TRACKS_MANIFEST_FILENAME` dans `settings.py`).
 
+### Schema `tracks.json`
+
+```json
+{
+  "default_cover": "cover.jpg",
+  "tracks": [
+    {
+      "audio": "01-intro.mp3",
+      "image": "art-intro.png",
+      "output": "intro"
+    },
+    {
+      "audio": "02-mid.mp3"
+    },
+    {
+      "audio": "subdir/03-outro.mp3",
+      "output": "outro.mp4"
+    }
+  ]
+}
+```
+
+Regles de validation par champ :
+
+| Champ | Niveau | Type | Requis | Comportement si invalide |
+|---|---|---|---|---|
+| `tracks` | racine | array | oui (si manifest utilise) | warning + scan |
+| `default_cover` | racine | string | non | ignore si absent/vide |
+| `audio` | piste | string | oui | entree silencieusement ignoree |
+| `image` | piste | string | non | fallback vers `default_cover` / name-match / cover |
+| `output` | piste | string | non | defaut : `<audio_stem>.mp4` ; `.mp4` ajoute si absent |
+
+Contraintes : tous les chemins (`audio`, `image`, `default_cover`) sont des chemins **relatifs a `input_dir`** ; tout chemin pointant hors de `input_dir` (via `..`) est rejete (`_file_in_input_dir` / `_is_under_dir`).
+
 **Resolution des paires** (`_resolve_track_pairs` dans `encoder.py`) :
 
 1. **Manifest valide** : `tracks` est une liste non vide. Chaque entree a au minimum `audio` (chemin relatif sous `input_dir`). Champs optionnels : `image`, `output`. Cle racine optionnelle : `default_cover`. Les entrees dont le champ `audio` est absent, vide, hors de `input_dir`, ou avec une extension non supportee sont **silencieusement ignorees** (aucune pre-failure, aucun avertissement).
 2. **Image par piste** (ordre de priorite) : `image` sur la piste, puis `default_cover`, puis image avec le **meme stem** que l’audio, puis `cover.*` (`--cover-name`, defaut `cover`).
-3. **Sans manifest**, **JSON invalide**, ou **`tracks` n'est pas une liste** : avertissement stderr, scan de tous les fichiers audio (tries), meme logique d'image sans le manifest.
-4. **Securite** : les chemins du manifest sont resolus sous `input_dir` (pas d’`..` sortant du dossier) via `_file_in_input_dir` / `_is_under_dir`.
+3. **Sans manifest**, **JSON invalide**, **racine JSON n'est pas un objet** (ex. tableau), ou **`tracks` n'est pas une liste** : avertissement stderr, scan de tous les fichiers audio (tries), meme logique d'image sans le manifest.
+4. **`tracks.json` present et dict valide, mais sans cle `tracks`** (ex. `{"default_cover": "cover.jpg"}`) : aucun avertissement, fallback silencieux vers scan. Le champ `default_cover` eventuel est ignore car le scan n'utilise pas le manifest. Mode retourne : `"scan"`.
+5. **Securite** : les chemins du manifest sont resolus sous `input_dir` (pas d’`..` sortant du dossier) via `_file_in_input_dir` / `_is_under_dir`.
 
 Types :
 
@@ -55,11 +90,11 @@ Types :
 
 ### Gestion des erreurs
 
-- `encode_video()` leve des exceptions (jamais `sys.exit`).
+- `encode_video()` leve des exceptions (jamais `sys.exit`). Leve `NotADirectoryError` si le dossier parent du fichier de sortie existe en tant que fichier.
 - `validate_inputs()` leve `FileNotFoundError` (absent) ou `ValueError` (dossier, extension invalide).
 - `_prepare_image()` leve `ValueError` pour dimensions nulles. Les erreurs PIL (image corrompue) sont wrappees en `ValueError` par `encode_video()`.
 - Si ffmpeg n'est pas installe : `RuntimeError`.
-- `batch_encode()` leve `FileNotFoundError` / `NotADirectoryError` si le dossier d'entree est invalide ; leve `ValueError` si deux pistes produiraient le **meme nom de sortie** ; leve `FileNotFoundError` si aucun job n'est possible (tracks vide, pas d'audio, pas d'image). Si toutes les pistes echouent par manque d'image, retourne `BatchResult` avec `successes=[]` et `failures` rempli.
+- `batch_encode()` leve `FileNotFoundError` / `NotADirectoryError` si le dossier d'entree est invalide ou si `--output-dir` pointe sur un fichier existant ; leve `ValueError` si deux pistes produiraient le **meme nom de sortie** ; leve `FileNotFoundError` si aucun job n'est possible (tracks vide ou toutes invalides en mode manifest, pas d'audio en mode scan). Si toutes les pistes echouent par manque d'image, retourne `BatchResult` avec `successes=[]` et `failures` rempli. Note : le mode scan ne re-scanne plus `idir` pour verifier la presence d'audio ; cette information est deja capturee par `_resolve_track_pairs`.
 - La CLI (`cli.py`) catche ces exceptions et retourne un code de sortie (0 ou 1).
 
 ### Repertoire temporaire
@@ -84,7 +119,7 @@ Pour ajouter une nouvelle qualite (ex. 1440p), ajouter une entree dans `QUALITY_
 - `_prepare_image(path, work_dir, resolution)` : retourne le chemin de l'image preparee. Si deja a la bonne taille, retourne le chemin original. Leve `ValueError` pour une image de dimensions nulles (`0×0`). Les erreurs PIL (`UnidentifiedImageError`, `OSError`) sont capturees dans `encode_video()` et converties en `ValueError("Cannot read image …")`.
 - `encode_video()` : accepte `quality` (str) OU des overrides manuels (`resolution`, `video_bitrate`, `frame_rate`). Les overrides ont priorite sur le preset.
 - `BatchResult` : dataclass avec `successes: list[Path]` et `failures: list[tuple[Path, str]]`.
-- `batch_encode()` : s'appuie sur `_resolve_track_pairs()` (manifest, name-match, cover). Retourne un `BatchResult`. Leve `ValueError` sur noms de sortie dupliques. Leve `FileNotFoundError` pour dossier invalide / vide d'audios. Un batch entierement sans piste valide retourne uniquement des echecs.
+- `batch_encode()` : s'appuie sur `_resolve_track_pairs()` (manifest, name-match, cover). Retourne un `BatchResult`. Leve `NotADirectoryError` si `input_dir` n'est pas un dossier ou si `output_dir` existe en tant que fichier. Leve `ValueError` sur noms de sortie dupliques. Leve `FileNotFoundError` si aucun job n'est possible. Un batch entierement sans piste valide retourne uniquement des echecs.
 - `_resolve_track_pairs()` : retourne `(list[TrackItem], list[tuple[Path, str]], mode)` avec `mode` in `("manifest", "scan")`.
 - `_normalize_output_name(name)` : ajoute `.mp4` au champ `output` du manifest si absent ou si l'extension n'est pas `.mp4`.
 

@@ -216,6 +216,16 @@ def test_encode_video_no_ffmpeg(tmp_image: Path, tmp_audio: Path, tmp_path: Path
             encode_video(tmp_image, tmp_audio, output)
 
 
+def test_encode_video_output_parent_is_file(tmp_image: Path, tmp_audio: Path, tmp_path: Path) -> None:
+    """encode_video must raise NotADirectoryError if the output parent is an existing file."""
+    blocker = tmp_path / "notadir"
+    blocker.write_text("i am a file")
+    output = blocker / "video.mp4"
+    with patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with pytest.raises(NotADirectoryError, match="already exists as a file"):
+            encode_video(tmp_image, tmp_audio, output)
+
+
 # --- batch_encode ---
 
 def test_batch_encode_success(batch_dir: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock) -> None:
@@ -265,6 +275,13 @@ def test_batch_encode_not_a_directory(tmp_path: Path) -> None:
     file_path.write_text("not a dir")
     with pytest.raises(NotADirectoryError, match="Input path is not a directory"):
         batch_encode(file_path, tmp_path / "out")
+
+
+def test_batch_encode_output_dir_is_existing_file(batch_dir: Path, tmp_path: Path) -> None:
+    existing_file = tmp_path / "output"
+    existing_file.write_text("i am a file, not a directory")
+    with pytest.raises(NotADirectoryError, match="already exists as a file"):
+        batch_encode(batch_dir, existing_file)
 
 
 def test_batch_encode_partial_failure(batch_dir: Path, tmp_path: Path) -> None:
@@ -397,4 +414,38 @@ def test_resolve_track_pairs_invalid_json_falls_back_to_scan(tmp_path: Path) -> 
     items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
     assert mode == "scan"
     assert len(items) == 1
+    assert items[0].image_path.name == "cover.png"
+
+
+def test_resolve_track_pairs_non_dict_json_falls_back_to_scan(tmp_path: Path) -> None:
+    """Valid JSON that is not an object (e.g. an array) must warn and fall back to scan."""
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text(
+        json.dumps([{"audio": "a.mp3"}]), encoding="utf-8"
+    )
+    (tmp_path / "cover.png").write_bytes(b"x")
+    (tmp_path / "a.mp3").write_bytes(b"\x00")
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "scan"
+    assert len(items) == 1
+    assert items[0].image_path.name == "cover.png"
+
+
+def test_resolve_track_pairs_dict_without_tracks_key_falls_back_to_scan(tmp_path: Path) -> None:
+    """tracks.json that is a valid dict but has no 'tracks' key falls back silently to scan.
+
+    In this case _load_tracks_manifest returns the dict, but _resolve_track_pairs
+    sees manifest.get('tracks') is None (not a list) and takes the scan path.
+    No warning is emitted. Any 'default_cover' defined in that manifest is ignored.
+    """
+    (tmp_path / TRACKS_MANIFEST_FILENAME).write_text(
+        json.dumps({"default_cover": "art.png"}), encoding="utf-8"
+    )
+    img = Image.new("RGB", (10, 10))
+    img.save(tmp_path / "cover.png")
+    (tmp_path / "a.mp3").write_bytes(b"\x00")
+    items, pre, mode = _resolve_track_pairs(tmp_path, "cover")
+    assert mode == "scan"
+    assert len(items) == 1
+    # default_cover from the manifest is NOT used in scan mode;
+    # cover.png is found via the image_index / global_cover path
     assert items[0].image_path.name == "cover.png"

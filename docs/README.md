@@ -105,23 +105,70 @@ mon_album/
 
 Si un fichier `tracks.json` est present **et** que le JSON est valide, la liste `tracks` definit l’ordre et les paires audio / image. Les fichiers audio qui ne sont pas dans cette liste ne sont pas traites.
 
-Exemple :
+#### Exemple complet (tous les champs)
 
 ```json
 {
   "default_cover": "cover.jpg",
   "tracks": [
-    { "audio": "01-intro.mp3", "image": "art-intro.png" },
-    { "audio": "02-mid.mp3" },
-    { "audio": "03-outro.mp3", "image": "art-outro.jpg", "output": "fin" }
+    {
+      "audio": "01-intro.mp3",
+      "image": "art-intro.png",
+      "output": "intro"
+    },
+    {
+      "audio": "02-mid.mp3"
+    },
+    {
+      "audio": "03-outro.mp3",
+      "image": "art-outro.jpg",
+      "output": "fin.mp4"
+    }
   ]
 }
 ```
 
-- `image` : optionnel ; sinon `default_cover`, puis une image au meme nom que l’audio, puis `cover.*` (`--cover-name`).
-- `output` : optionnel ; nom du fichier video (`.mp4` ajoute si absent). Par defaut : `<nom du fichier audio>.mp4`.
+#### Exemple minimal (une image globale pour toutes les pistes)
 
-Si `tracks.json` est absent ou JSON invalide, un message d’avertissement s’affiche et le mode **scan du dossier** (tous les audios) est utilise.
+```json
+{
+  "default_cover": "cover.jpg",
+  "tracks": [
+    { "audio": "01-intro.mp3" },
+    { "audio": "02-mid.mp3" },
+    { "audio": "03-outro.mp3" }
+  ]
+}
+```
+
+#### Exemple sans default_cover (image par piste ou cover.* en fallback)
+
+```json
+{
+  "tracks": [
+    { "audio": "01-intro.mp3", "image": "art-intro.png" },
+    { "audio": "02-mid.mp3",   "image": "art-mid.jpg" },
+    { "audio": "03-outro.mp3" }
+  ]
+}
+```
+
+> Pour `03-outro.mp3` : pas d’`image` dans l’entree, pas de `default_cover` → cherche `03-outro.*` dans le dossier, puis `cover.*` en dernier recours.
+
+#### Reference des champs
+
+| Champ | Niveau | Obligatoire | Description |
+|---|---|---|---|
+| `tracks` | racine | oui | Liste des pistes a encoder (dans l’ordre) |
+| `default_cover` | racine | non | Image de fallback pour toutes les pistes sans `image` explicite |
+| `audio` | piste | oui | Chemin relatif du fichier audio (sous le dossier batch) |
+| `image` | piste | non | Image specifique a cette piste (priorite maximale) |
+| `output` | piste | non | Nom du fichier de sortie (`.mp4` ajoute si absent) |
+
+- Si `output` est absent : le nom de sortie est `<nom_audio>.mp4`.
+- Si `image` est absent : ordre de priorite → `default_cover` → image meme nom que l’audio → `cover.*`.
+
+Si `tracks.json` est absent, JSON invalide, ou que sa racine n’est pas un objet JSON, un message d’avertissement s’affiche et le mode **scan du dossier** (tous les audios) est utilise. Si le fichier est un objet JSON valide mais sans cle `tracks`, le scan est utilise silencieusement (sans avertissement).
 
 ### Options batch
 

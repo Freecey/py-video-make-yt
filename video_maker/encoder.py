@@ -113,6 +113,11 @@ def encode_video(
 
     output_path = output_path.resolve()
 
+    if output_path.parent.exists() and not output_path.parent.is_dir():
+        raise NotADirectoryError(
+            f"Output parent path already exists as a file: {output_path.parent}"
+        )
+
     work_dir = Path(tempfile.mkdtemp(prefix="video_maker_"))
 
     try:
@@ -232,6 +237,11 @@ def _load_tracks_manifest(input_dir: Path) -> dict | None:
         )
         return None
     if not isinstance(data, dict):
+        print(
+            f"Warning: {TRACKS_MANIFEST_FILENAME} root must be a JSON object; "
+            f"ignoring manifest.",
+            file=sys.stderr,
+        )
         return None
     if "tracks" in data and not isinstance(data.get("tracks"), list):
         print(
@@ -392,6 +402,8 @@ def batch_encode(
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
     if not input_dir.is_dir():
         raise NotADirectoryError(f"Input path is not a directory: {input_dir}")
+    if output_dir.exists() and not output_dir.is_dir():
+        raise NotADirectoryError(f"Output path already exists as a file: {output_dir}")
 
     idir = input_dir.resolve()
     track_items, pre_failures, mode = _resolve_track_pairs(idir, image_name)
@@ -409,6 +421,7 @@ def batch_encode(
 
     if not track_items:
         if mode == "manifest" and not encode_failures:
+            # Re-read to distinguish empty tracks list vs all-invalid entries.
             if (idir / TRACKS_MANIFEST_FILENAME).is_file():
                 try:
                     with (idir / TRACKS_MANIFEST_FILENAME).open(encoding="utf-8") as f:
@@ -426,23 +439,10 @@ def batch_encode(
             raise FileNotFoundError(
                 f"No valid audio entries in {TRACKS_MANIFEST_FILENAME} in {idir}."
             )
-        if mode == "manifest" and encode_failures:
+        # manifest with all tracks missing images, or scan mode with no audio/images
+        if encode_failures:
             return BatchResult(successes=[], failures=encode_failures)
-        any_audio = any(
-            f.suffix.lower() in SUPPORTED_AUDIO_EXTENSIONS
-            for f in idir.iterdir()
-        )
-        if not any_audio and not encode_failures:
-            raise FileNotFoundError(f"No audio files found in {idir}")
-        if encode_failures and not track_items:
-            return BatchResult(successes=[], failures=encode_failures)
-        if not any_audio:
-            raise FileNotFoundError(f"No audio files found in {idir}")
-        raise FileNotFoundError(
-            f"No image could be assigned to any encodable track in {idir}. "
-            f"Add a {image_name!r} image, per-audio art with the same name as the audio, "
-            f"or a valid {TRACKS_MANIFEST_FILENAME}."
-        )
+        raise FileNotFoundError(f"No audio files found in {idir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     print(

@@ -21,3 +21,13 @@ Le code est propre. Aucun bug détecté.
 
 - 55/55 tests passent
 - 0 erreur lint
+
+## Fix additionnel (post-audit)
+
+| Fichier | Issue | Fix |
+|---------|-------|-----|
+| `encoder.py` | `output_dir` pointant sur un fichier existant → `FileExistsError` non catchée → traceback brut | Validation anticipée : `NotADirectoryError` si `output_dir.exists() and not output_dir.is_dir()` |
+| `tests/test_encoder.py` | Cas non testé | `test_batch_encode_output_dir_is_existing_file` ajouté |
+| `docs/AGENTS.md` | Comportement non documenté | Note ajoutée dans gestion des erreurs |
+
+56/56 tests passent.
