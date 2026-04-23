@@ -134,6 +134,11 @@ Pour ajouter une nouvelle qualite (ex. 1440p), ajouter une entree dans `QUALITY_
 ### Tests
 
 - `tests/conftest.py` : fixtures partagees (`tmp_image`, `tmp_audio`, `batch_dir`, `mock_ffmpeg_ok`, `mock_ffmpeg_fail`).
+- **Tests fonctionnels manuels** (Luna, 2026-04-23) : validés en conditions réelles — `single` (1080p, 4k, custom resolution/bitrate), `batch` avec manifest (1 image/track, 3 tracks — couleurs vérifiées pixel par pixel), edge cases (path traversal bloqué, output dir = fichier existant, manifest racine = liste, silent skip audio inexistant, duplicate output names).
+
+### Approbation
+
+- **Luna** — testée et approuvée ✅ (23/04/2026)
 - `tests/test_encoder.py` : tests unitaires sur validation, preparation image, encodage (ffmpeg mocke), batch, resultats partiels.
 - `tests/test_cli.py` : tests du parsing CLI, `_parse_resolution`, retours de `main()` (single/batch/help, cas d'erreur).
 - ffmpeg est toujours mocke dans les tests unitaires via `unittest.mock.patch`.
