@@ -201,3 +201,7 @@ L'image est **automatiquement redimensionnee** pour correspondre a la resolution
 |------|-----------|
 | Image | .jpg, .jpeg, .png, .bmp, .webp, .tiff |
 | Audio | .mp3, .wav, .aac, .m4a, .ogg, .opus, .flac, .wma |
+
+## Approbation
+
+**Luna** — testée et approuvée ✅ (23/04/2026)
