@@ -44,6 +44,7 @@ def test_parse_args_single_defaults() -> None:
     assert args.resolution is None
     assert args.bitrate is None
     assert args.fps is None
+    assert args.blur_bg is True
 
 
 def test_parse_args_batch_defaults() -> None:
@@ -51,6 +52,35 @@ def test_parse_args_batch_defaults() -> None:
     assert args.quality == "1080p"
     assert args.cover_name == "cover"
     assert args.output_dir is None
+    assert args.blur_bg is True
+    assert args.skip_existing is False
+
+
+def test_parse_args_batch_skip_existing() -> None:
+    args = parse_args(["batch", "/some/dir", "--skip-existing"])
+    assert args.skip_existing is True
+
+
+def test_parse_args_batch_jobs() -> None:
+    args = parse_args(["batch", "/some/dir", "-j", "4"])
+    assert args.jobs == 4
+
+
+def test_parse_args_batch_jobs_default() -> None:
+    args = parse_args(["batch", "/some/dir"])
+    assert args.jobs == 1
+
+
+def test_parse_args_single_no_blur_bg() -> None:
+    """--no-blur-bg on single sets blur_bg to False."""
+    args = parse_args(["single", "-i", "img.png", "-a", "audio.wav", "--no-blur-bg"])
+    assert args.blur_bg is False
+
+
+def test_parse_args_batch_no_blur_bg() -> None:
+    """--no-blur-bg on batch sets blur_bg to False."""
+    args = parse_args(["batch", "/some/dir", "--no-blur-bg"])
+    assert args.blur_bg is False
 
 
 # --- _parse_resolution ---
@@ -85,7 +115,7 @@ def test_parse_resolution_zero_or_negative() -> None:
 # --- main: single ---
 
 def test_main_single_success(tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock) -> None:
-    with patch("video_maker.encoder.subprocess.run", return_value=mock_ffmpeg_ok), \
+    with patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_ok), \
          patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
         ret = main([
             "single",
@@ -118,7 +148,7 @@ def test_main_single_missing_image(tmp_audio: Path, tmp_path: Path) -> None:
 
 
 def test_main_single_ffmpeg_fails(tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_fail: MagicMock) -> None:
-    with patch("video_maker.encoder.subprocess.run", return_value=mock_ffmpeg_fail), \
+    with patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_fail), \
          patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
         ret = main([
             "single",
@@ -144,7 +174,7 @@ def test_main_single_output_parent_is_file(tmp_image: Path, tmp_audio: Path, tmp
 
 
 def test_main_single_no_ffmpeg(tmp_image: Path, tmp_audio: Path, tmp_path: Path) -> None:
-    with patch("video_maker.encoder.shutil.which", return_value=None):
+    with patch("video_maker.encoder.check_ffmpeg_available", side_effect=RuntimeError("ffmpeg is not installed or not in PATH.")):
         ret = main([
             "single",
             "-i", str(tmp_image),
@@ -155,7 +185,7 @@ def test_main_single_no_ffmpeg(tmp_image: Path, tmp_audio: Path, tmp_path: Path)
 
 
 def test_main_single_with_overrides(tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock) -> None:
-    with patch("video_maker.encoder.subprocess.run", return_value=mock_ffmpeg_ok) as mock_run, \
+    with patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_ok) as mock_run, \
          patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
         ret = main([
             "single",
@@ -175,7 +205,7 @@ def test_main_single_with_overrides(tmp_image: Path, tmp_audio: Path, tmp_path: 
 # --- main: batch ---
 
 def test_main_batch_success(batch_dir: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock) -> None:
-    with patch("video_maker.encoder.subprocess.run", return_value=mock_ffmpeg_ok), \
+    with patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_ok), \
          patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
         ret = main(["batch", str(batch_dir), "-o", str(tmp_path / "out")])
     assert ret == 0
@@ -199,18 +229,42 @@ def test_main_batch_partial_failure(batch_dir: Path, tmp_path: Path) -> None:
     """Batch with one failure returns exit code 1."""
     call_count = 0
 
-    def _mock_run(*args, **kwargs):
+    def _mock_popen(*args, **kwargs):
         nonlocal call_count
         call_count += 1
-        result = MagicMock()
-        result.returncode = 1 if call_count == 1 else 0
-        result.stderr = "error" if call_count == 1 else ""
-        return result
+        process = MagicMock()
+        # Fail the first AND second call (normal + retry) for track 1
+        if call_count <= 2:
+            process.stderr = iter(["error\n"])
+            process.wait.return_value = 1
+        else:
+            process.stderr = iter([])
+            process.wait.return_value = 0
+        return process
 
-    with patch("video_maker.encoder.subprocess.run", side_effect=_mock_run), \
+    with patch("video_maker.encoder.subprocess.Popen", side_effect=_mock_popen), \
          patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
         ret = main(["batch", str(batch_dir), "-o", str(tmp_path / "out")])
     assert ret == 1
+
+
+def test_main_single_no_blur_bg_propagates(
+    tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock
+) -> None:
+    """main single must pass blur_bg=False to _prepare_image when --no-blur-bg is used."""
+    with patch("video_maker.encoder._prepare_image") as mock_prepare, \
+         patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_ok), \
+         patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
+        mock_prepare.return_value = tmp_image
+        ret = main([
+            "single",
+            "-i", str(tmp_image),
+            "-a", str(tmp_audio),
+            "-o", str(tmp_path / "out.mp4"),
+            "--no-blur-bg",
+        ])
+    assert ret == 0
+    assert mock_prepare.call_args.kwargs.get("blur_bg") is False
 
 
 # --- main: no subcommand ---

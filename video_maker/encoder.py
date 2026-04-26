@@ -3,24 +3,170 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
+import logging
+import re
 from collections import Counter
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFilter, UnidentifiedImageError
 
 from video_maker.settings import (
+    BLUR_BACKGROUND_RADIUS,
     ENCODING_SETTINGS,
+    LOUDNORM_TARGET_I,
+    LOUDNORM_TARGET_LRA,
+    LOUDNORM_TARGET_TP,
     QUALITY_PRESETS,
     SUPPORTED_AUDIO_EXTENSIONS,
     SUPPORTED_IMAGE_EXTENSIONS,
+    TEXT_OVERLAY_BORDER_COLOR,
+    TEXT_OVERLAY_BORDER_WIDTH,
+    TEXT_OVERLAY_FONT_COLOR,
+    TEXT_OVERLAY_FONT_SIZE,
+    TEXT_OVERLAY_Y_OFFSET,
+    THUMBNAIL_FORMAT,
+    THUMBNAIL_SIZE,
+    THUMBNAIL_SUFFIX,
     TRACKS_MANIFEST_FILENAME,
+    EncodingSettings,
     QualityPreset,
 )
+
+logger = logging.getLogger(__name__)
+
+_ERROR_MARKERS = ("[error]", "error:", "invalid", "cannot", "no such", "not found", "failed")
+
+_REQUIRED_CODECS = {"libx264", "aac"}
+
+
+@functools.lru_cache(maxsize=1)
+def check_ffmpeg_available() -> str:
+    """Check ffmpeg is installed and has required codecs.
+
+    Returns the ffmpeg path. Raises RuntimeError if missing or codecs unavailable.
+    """
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise RuntimeError("ffmpeg is not installed or not in PATH.")
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(f"Cannot query ffmpeg encoders: {exc}") from exc
+    found = set()
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith((" ", "V", "A")):
+            found.add(parts[1].lstrip("."))
+    missing = _REQUIRED_CODECS - found
+    if missing:
+        raise RuntimeError(
+            f"ffmpeg missing required codecs: {', '.join(sorted(missing))}"
+        )
+    return ffmpeg_path
+
+
+def _parse_ffmpeg_error(stderr: str | None) -> str:
+    """Extract the last meaningful error lines from ffmpeg stderr."""
+    if not stderr:
+        return "ffmpeg failed (no stderr output)"
+    lines = stderr.strip().splitlines()
+    error_lines: list[str] = []
+    for line in reversed(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.lower()
+        if any(marker in lower for marker in _ERROR_MARKERS):
+            error_lines.append(stripped)
+        if len(error_lines) >= 5:
+            break
+    if not error_lines:
+        for line in reversed(lines):
+            if line.strip():
+                error_lines.append(line.strip())
+            if len(error_lines) >= 3:
+                break
+    return "\n".join(reversed(error_lines))
+
+
+_TIME_RE = re.compile(r"time=\s*(\d+:\d+:\d+\.\d+)")
+
+
+def _get_audio_duration(audio_path: Path) -> float | None:
+    """Get audio duration in seconds using ffprobe. Returns None on failure."""
+    if shutil.which("ffprobe") is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                str(audio_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return None
+
+
+def _format_seconds(seconds: float) -> str:
+    """Format seconds as MM:SS."""
+    mins = int(seconds) // 60
+    secs = int(seconds) % 60
+    return f"{mins:02d}:{secs:02d}"
+
+
+def _parse_time_to_seconds(time_str: str) -> float | None:
+    """Convert HH:MM:SS.ff to seconds."""
+    try:
+        parts = time_str.split(":")
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except (ValueError, IndexError):
+        return None
+
+
+def _format_progress_bar(current: float, total: float, width: int = 30) -> str:
+    """Format a visual progress bar: [=====>    ] 45% (01:23 / 04:56)."""
+    if total <= 0:
+        return f"  {_format_seconds(current)}"
+    pct = min(current / total, 1.0)
+    filled = int(pct * width)
+    bar = "=" * filled + ">" + " " * (width - filled - 1)
+    return f"  [{bar}] {pct:5.1%} ({_format_seconds(current)} / {_format_seconds(total)})"
+
+
+def _escape_drawtext(text: str) -> str:
+    """Escape special characters for ffmpeg drawtext filter."""
+    text = text.replace("\\", "\\\\\\\\")
+    text = text.replace("'", "\\\\'")
+    text = text.replace(":", "\\\\:")
+    text = text.replace("%", "\\\\%")
+    text = text.replace("{", "\\\\{")
+    text = text.replace("}", "\\\\}")
+    text = text.replace(";", "\\\\;")
+    text = text.replace("\n", " ")
+    text = text.replace("\r", "")
+    return text
 
 
 def resolve_quality(quality: str) -> QualityPreset:
@@ -55,8 +201,18 @@ def validate_inputs(image_path: Path, audio_path: Path) -> None:
         )
 
 
-def _prepare_image(image_path: Path, work_dir: Path, resolution: tuple[int, int]) -> Path:
-    """Resize image to target resolution with letterboxing to preserve aspect ratio."""
+def _prepare_image(
+    image_path: Path,
+    work_dir: Path,
+    resolution: tuple[int, int],
+    blur_bg: bool = True,
+) -> Path:
+    """Resize image to target resolution, preserving aspect ratio (contain + centered).
+
+    When blur_bg=True (default): the empty space around the foreground is filled with
+    a blurred, cover-scaled version of the same image instead of plain black bars.
+    When blur_bg=False: classic black letterbox background.
+    """
     target_w, target_h = resolution
     with Image.open(image_path) as raw_img:
         img = raw_img.convert("RGB")
@@ -69,6 +225,8 @@ def _prepare_image(image_path: Path, work_dir: Path, resolution: tuple[int, int]
 
     img_ratio = img.width / img.height
     target_ratio = target_w / target_h
+
+    # --- Foreground: contain (ratio preserved, centered) ---
     if img_ratio > target_ratio:
         new_w = target_w
         new_h = max(1, int(target_w / img_ratio))
@@ -76,11 +234,30 @@ def _prepare_image(image_path: Path, work_dir: Path, resolution: tuple[int, int]
         new_h = target_h
         new_w = max(1, int(target_h * img_ratio))
 
-    img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+    fg = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     offset_x = (target_w - new_w) // 2
     offset_y = (target_h - new_h) // 2
-    canvas.paste(img_resized, (offset_x, offset_y))
+
+    # --- Background ---
+    if blur_bg:
+        # Cover mode: scale so both dimensions >= target, then center-crop.
+        # For wide images (img_ratio > target_ratio): match height, excess width cropped.
+        # For tall/square images: match width, excess height cropped.
+        if img_ratio > target_ratio:
+            bg_h = target_h
+            bg_w = max(target_w, int(target_h * img_ratio))
+        else:
+            bg_w = target_w
+            bg_h = max(target_h, int(target_w / img_ratio))
+        bg = img.resize((bg_w, bg_h), Image.Resampling.LANCZOS)
+        crop_x = (bg_w - target_w) // 2
+        crop_y = (bg_h - target_h) // 2
+        bg = bg.crop((crop_x, crop_y, crop_x + target_w, crop_y + target_h))
+        canvas = bg.filter(ImageFilter.GaussianBlur(radius=BLUR_BACKGROUND_RADIUS))
+    else:
+        canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+
+    canvas.paste(fg, (offset_x, offset_y))
     prepared_path = work_dir / f"_prepared_{image_path.stem}.png"
     canvas.save(prepared_path, "PNG")
     return prepared_path
@@ -94,22 +271,30 @@ def encode_video(
     resolution: tuple[int, int] | None = None,
     video_bitrate: str | None = None,
     frame_rate: int | None = None,
+    blur_bg: bool = True,
+    dry_run: bool = False,
+    normalize: bool = False,
+    title: str | None = None,
+    generate_thumbnail: bool = False,
+    _preset_override: str | None = None,
 ) -> Path:
     """
     Combine a static image and audio file into an MP4 video optimized for YouTube.
 
+    blur_bg: when True (default), fills letterbox areas with a blurred cover-scaled
+    version of the same image instead of plain black bars.
+
     Returns the path to the generated video.
     """
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("ffmpeg is not installed or not in PATH.")
+    check_ffmpeg_available()
 
     validate_inputs(image_path, audio_path)
 
     preset = resolve_quality(quality)
 
-    res = resolution or preset["resolution"]
-    vbr = video_bitrate or preset["video_bitrate"]
-    fps = frame_rate or preset["frame_rate"]
+    res = resolution or preset.resolution
+    vbr = video_bitrate or preset.video_bitrate
+    fps = frame_rate or preset.frame_rate
 
     output_path = output_path.resolve()
 
@@ -122,7 +307,7 @@ def encode_video(
 
     try:
         try:
-            prepared_image = _prepare_image(image_path, work_dir, res)
+            prepared_image = _prepare_image(image_path, work_dir, res, blur_bg=blur_bg)
         except (UnidentifiedImageError, OSError) as exc:
             raise ValueError(f"Cannot read image '{image_path}': {exc}") from exc
 
@@ -139,39 +324,100 @@ def encode_video(
             "-i", str(audio_path),
             "-map", "0:v:0",
             "-map", "1:a:0",
-            "-c:v", ENCODING_SETTINGS["video_codec"],
+            "-c:v", ENCODING_SETTINGS.video_codec,
             "-tune", "stillimage",
-            "-preset", ENCODING_SETTINGS["preset"],
-            "-profile:v", ENCODING_SETTINGS["profile"],
+            "-preset", _preset_override or ENCODING_SETTINGS.preset,
+            "-profile:v", ENCODING_SETTINGS.profile,
             "-b:v", vbr,
-            "-pix_fmt", ENCODING_SETTINGS["pix_fmt"],
+            "-pix_fmt", ENCODING_SETTINGS.pix_fmt,
             "-r", str(fps),
-            "-c:a", ENCODING_SETTINGS["audio_codec"],
-            "-b:a", ENCODING_SETTINGS["audio_bitrate"],
-            "-ar", str(ENCODING_SETTINGS["audio_sample_rate"]),
-            "-ac", str(ENCODING_SETTINGS["audio_channels"]),
-            "-shortest",
-            "-movflags", ENCODING_SETTINGS["movflags"],
-            str(output_path),
+            "-c:a", ENCODING_SETTINGS.audio_codec,
+            "-b:a", ENCODING_SETTINGS.audio_bitrate,
+            "-ar", str(ENCODING_SETTINGS.audio_sample_rate),
+            "-ac", str(ENCODING_SETTINGS.audio_channels),
         ]
+        if title:
+            escaped = _escape_drawtext(title)
+            drawtext = (
+                f"drawtext=text='{escaped}'"
+                f":fontsize={TEXT_OVERLAY_FONT_SIZE}"
+                f":fontcolor={TEXT_OVERLAY_FONT_COLOR}"
+                f":borderw={TEXT_OVERLAY_BORDER_WIDTH}"
+                f":bordercolor={TEXT_OVERLAY_BORDER_COLOR}"
+                f":x=(w-text_w)/2"
+                f":y=h-text_h-{TEXT_OVERLAY_Y_OFFSET}"
+            )
+            cmd.extend(["-vf", drawtext])
+        if normalize:
+            cmd.extend([
+                "-af",
+                f"loudnorm=I={LOUDNORM_TARGET_I}:TP={LOUDNORM_TARGET_TP}:LRA={LOUDNORM_TARGET_LRA}",
+            ])
+        cmd.extend([
+            "-shortest",
+            "-movflags", ENCODING_SETTINGS.movflags,
+            str(output_path),
+        ])
 
-        print(f"Encoding [{quality.upper()} {res[0]}x{res[1]}]: {output_path.name} ...")
-        result = subprocess.run(
+        logger.info("Encoding [%s %dx%d]: %s ...", quality.upper(), res[0], res[1], output_path.name)
+
+        if dry_run:
+            logger.info("[DRY RUN] Command: %s", " ".join(cmd))
+            return output_path
+
+        total_duration = _get_audio_duration(audio_path)
+        process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )
+        try:
+            stderr_lines: list[str] = []
+            last_progress = 0.0
+            for line in process.stderr:
+                stderr_lines.append(line)
+                logger.debug("ffmpeg: %s", line.rstrip())
+                match = _TIME_RE.search(line)
+                if match:
+                    current = _parse_time_to_seconds(match.group(1))
+                    if current is not None and current - last_progress >= 1.0:
+                        last_progress = current
+                        if total_duration:
+                            progress = _format_progress_bar(current, total_duration)
+                        else:
+                            progress = _format_progress_bar(current, 0)
+                        sys.stderr.write(f"\r{progress}")
+                        sys.stderr.flush()
 
-        if result.returncode != 0:
-            print(f"ffmpeg stderr:\n{result.stderr}", file=sys.stderr)
-            raise RuntimeError(f"ffmpeg failed with exit code {result.returncode}")
+            returncode = process.wait()
+            sys.stderr.write("\n")
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+
+        if returncode != 0:
+            full_stderr = "".join(stderr_lines)
+            logger.debug("ffmpeg stderr:\n%s", full_stderr)
+            clean_error = _parse_ffmpeg_error(full_stderr)
+            raise RuntimeError(
+                f"ffmpeg failed (exit code {returncode}):\n{clean_error}"
+            )
 
         if output_path.exists():
             size_mb = output_path.stat().st_size / (1024 * 1024)
-            print(f"Done! Output: {output_path} ({size_mb:.1f} MB)")
+            logger.info("Done! Output: %s (%.1f MB)", output_path, size_mb)
         else:
-            print(f"Done! Output: {output_path}")
+            logger.info("Done! Output: %s", output_path)
+
+        if generate_thumbnail:
+            thumb_path = output_path.parent / f"{output_path.stem}{THUMBNAIL_SUFFIX}.jpg"
+            with Image.open(prepared_image) as thumb_img:
+                thumb = thumb_img.convert("RGB")
+                thumb = thumb.resize(THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+                thumb.save(thumb_path, THUMBNAIL_FORMAT, quality=90)
+            logger.info("Thumbnail: %s", thumb_path)
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -192,6 +438,20 @@ class BatchResult:
     """Structured result from batch encoding."""
     successes: list[Path]
     failures: list[tuple[Path, str]]
+    track_results: list[TrackResult] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class TrackResult:
+    """Per-track result for batch summary."""
+    name: str
+    status: str  # "ok", "failed", "skipped"
+    elapsed: float = 0.0
+    size_bytes: int = 0
+
+    @property
+    def size_mb(self) -> float:
+        return self.size_bytes / (1024 * 1024)
 
 
 def _is_under_dir(parent: Path, child: Path) -> bool:
@@ -230,24 +490,21 @@ def _load_tracks_manifest(input_dir: Path) -> dict | None:
         with path.open(encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as exc:
-        print(
-            f"Warning: {TRACKS_MANIFEST_FILENAME} is not valid JSON ({exc}); "
-            f"using folder scan and name-matching mode.",
-            file=sys.stderr,
+        logger.warning(
+            "%s is not valid JSON (%s); using folder scan and name-matching mode.",
+            TRACKS_MANIFEST_FILENAME, exc,
         )
         return None
     if not isinstance(data, dict):
-        print(
-            f"Warning: {TRACKS_MANIFEST_FILENAME} root must be a JSON object; "
-            f"ignoring manifest.",
-            file=sys.stderr,
+        logger.warning(
+            "%s root must be a JSON object; ignoring manifest.",
+            TRACKS_MANIFEST_FILENAME,
         )
         return None
     if "tracks" in data and not isinstance(data.get("tracks"), list):
-        print(
-            f"Warning: {TRACKS_MANIFEST_FILENAME} 'tracks' must be a list; "
-            f"ignoring manifest.",
-            file=sys.stderr,
+        logger.warning(
+            "%s 'tracks' must be a list; ignoring manifest.",
+            TRACKS_MANIFEST_FILENAME,
         )
         return None
     return data
@@ -257,6 +514,9 @@ def _normalize_output_name(name: str) -> str:
     name = name.strip()
     if not name:
         return name
+    # Reject path traversal: only accept a simple filename (no / or ..)
+    if "/" in name or "\\" in name or ".." in name:
+        return ""
     if not name.lower().endswith(".mp4"):
         name = f"{name}.mp4"
     return name
@@ -375,14 +635,126 @@ def _resolve_track_pairs(
     return items, pre_failures, "scan"
 
 
+def _print_batch_summary(track_results: list[TrackResult]) -> None:
+    """Print a formatted summary table for batch results."""
+    name_w = max(len(tr.name) for tr in track_results)
+    name_w = max(name_w, 4)  # minimum header width
+    header = f"  {'File':<{name_w}}  {'Status':<8}  {'Size':>10}  {'Time':>8}"
+    logger.info(header)
+    logger.info("  " + "-" * (len(header) - 2))
+    for tr in track_results:
+        size_str = f"{tr.size_mb:.1f} MB" if tr.size_bytes else "-"
+        elapsed_str = _format_seconds(tr.elapsed) if tr.elapsed > 0 else "-"
+        logger.info(
+            f"  {tr.name:<{name_w}}  {tr.status:<8}  {size_str:>10}  {elapsed_str:>8}"
+        )
+
+
+def _estimate_batch_size(track_items: list[TrackItem], preset: QualityPreset) -> int:
+    """Rough estimate of total output size in bytes.
+
+    Uses a heuristic: video_bitrate * average_audio_duration_estimate.
+    Falls back to 50 MB per track if duration cannot be estimated.
+    """
+    # Parse bitrate string (e.g. "8M" -> 8_000_000)
+    vbr_str = preset.video_bitrate.upper()
+    multiplier = {"K": 1000, "M": 1_000_000, "G": 1_000_000_000}
+    vbr_bps = int(float("".join(c for c in vbr_str if c.isdigit() or c == ".")) * multiplier.get(vbr_str[-1], 1))
+    estimated_per_track = vbr_bps * 4 * 60  # assume ~4 min average
+    return estimated_per_track * len(track_items)
+
+
+def _encode_single_track(
+    item: TrackItem,
+    output_dir: Path,
+    quality: str,
+    blur_bg: bool,
+    dry_run: bool,
+    skip_existing: bool,
+    normalize: bool = False,
+    title: str | None = None,
+    generate_thumbnail: bool = False,
+    retry: bool = True,
+) -> tuple[Path | None, tuple[Path, str] | None, TrackResult]:
+    """Encode a single track. Returns (success_path, failure_or_none, track_result).
+
+    When retry=True and ffmpeg fails with RuntimeError, retries once with the
+    ultrafast preset before giving up.
+    """
+    out_path = output_dir / item.output_filename
+    if skip_existing and out_path.exists() and out_path.is_file():
+        if (out_path.stat().st_size > 0
+                and out_path.stat().st_mtime >= item.audio_path.stat().st_mtime):
+            logger.info("  SKIP (already encoded): %s", item.output_filename)
+            size = out_path.stat().st_size
+            return out_path, None, TrackResult(item.output_filename, "skipped", 0.0, size)
+    if dry_run:
+        logger.info("[DRY RUN] Would encode: %s", item.output_filename)
+        return out_path, None, TrackResult(item.output_filename, "ok")
+    t0 = time.monotonic()
+    try:
+        result = encode_video(
+            image_path=item.image_path,
+            audio_path=item.audio_path,
+            output_path=out_path,
+            quality=quality,
+            blur_bg=blur_bg,
+            normalize=normalize,
+            title=title,
+            generate_thumbnail=generate_thumbnail,
+        )
+        elapsed = time.monotonic() - t0
+        size = result.stat().st_size if result.exists() else 0
+        return result, None, TrackResult(item.output_filename, "ok", elapsed, size)
+    except RuntimeError as exc:
+        if retry:
+            logger.warning(
+                "  RETRY: %s failed, retrying with ultrafast preset...",
+                item.output_filename,
+            )
+            try:
+                result = encode_video(
+                    image_path=item.image_path,
+                    audio_path=item.audio_path,
+                    output_path=out_path,
+                    quality=quality,
+                    blur_bg=blur_bg,
+                    normalize=normalize,
+                    title=title,
+                    generate_thumbnail=generate_thumbnail,
+                    _preset_override="ultrafast",
+                )
+                elapsed = time.monotonic() - t0
+                size = result.stat().st_size if result.exists() else 0
+                return result, None, TrackResult(item.output_filename, "ok", elapsed, size)
+            except (RuntimeError, ValueError) as retry_exc:
+                elapsed = time.monotonic() - t0
+                logger.warning("  SKIP (retry also failed): %s", retry_exc)
+                return None, (item.audio_path, str(retry_exc)), TrackResult(item.output_filename, "failed", elapsed)
+        elapsed = time.monotonic() - t0
+        logger.warning("  SKIP: %s", exc)
+        return None, (item.audio_path, str(exc)), TrackResult(item.output_filename, "failed", elapsed)
+    except ValueError as exc:
+        elapsed = time.monotonic() - t0
+        logger.warning("  SKIP: %s", exc)
+        return None, (item.audio_path, str(exc)), TrackResult(item.output_filename, "failed", elapsed)
+
+
 def batch_encode(
     input_dir: Path,
     output_dir: Path,
     quality: str = "1080p",
     image_name: str = "cover",
+    blur_bg: bool = True,
+    dry_run: bool = False,
+    skip_existing: bool = False,
+    max_workers: int = 1,
+    normalize: bool = False,
+    title: str | None = None,
+    generate_thumbnail: bool = False,
+    retry: bool = True,
 ) -> BatchResult:
-    """
-    Batch-encode from input_dir. Pairing of image + audio:
+    """Batch-encode from input_dir. Pairing of image + audio:
 
     1) If `tracks.json` is valid, its ``tracks`` list is used (in order) with
        optional per-track ``image``, optional ``default_cover`` at the root, and
@@ -421,7 +793,6 @@ def batch_encode(
 
     if not track_items:
         if mode == "manifest" and not encode_failures:
-            # Re-read to distinguish empty tracks list vs all-invalid entries.
             if (idir / TRACKS_MANIFEST_FILENAME).is_file():
                 try:
                     with (idir / TRACKS_MANIFEST_FILENAME).open(encoding="utf-8") as f:
@@ -439,49 +810,96 @@ def batch_encode(
             raise FileNotFoundError(
                 f"No valid audio entries in {TRACKS_MANIFEST_FILENAME} in {idir}."
             )
-        # manifest with all tracks missing images, or scan mode with no audio/images
         if encode_failures:
             return BatchResult(successes=[], failures=encode_failures)
         raise FileNotFoundError(f"No audio files found in {idir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(
-        f"Batch mode: {len(track_items)} job(s) "
-        f"({'manifest' if mode == 'manifest' else 'folder scan'})"
+
+    # Disk space check
+    if not dry_run:
+        preset = resolve_quality(quality)
+        estimated = _estimate_batch_size(track_items, preset)
+        disk_free = shutil.disk_usage(output_dir).free
+        if disk_free < estimated:
+            free_gb = disk_free / (1024 ** 3)
+            need_gb = estimated / (1024 ** 3)
+            raise OSError(
+                f"Insufficient disk space: {free_gb:.1f} GB free, "
+                f"estimated {need_gb:.1f} GB needed for {len(track_items)} video(s)."
+            )
+
+    logger.info(
+        "Batch mode: %d job(s) (%s)",
+        len(track_items),
+        "manifest" if mode == "manifest" else "folder scan",
     )
-    print(f"Quality: {quality} | Output: {output_dir}")
+    logger.info("Quality: %s | Output: %s", quality, output_dir)
     if pre_failures:
-        print("-" * 50)
+        logger.info("-" * 50)
     for p, reason in pre_failures:
-        print(f"  SKIP: {p.name} — {reason}", file=sys.stderr)
+        logger.warning("  SKIP: %s — %s", p.name, reason)
     if pre_failures:
-        print("-" * 50)
+        logger.info("-" * 50)
+
+    for i, item in enumerate(track_items, 1):
+        logger.info(
+            "\n[%d/%d] %s + %s -> %s",
+            i, len(track_items),
+            item.audio_path.name,
+            item.image_path.name,
+            item.output_filename,
+        )
 
     successes: list[Path] = []
-    for i, item in enumerate(track_items, 1):
-        out_path = output_dir / item.output_filename
-        print(
-            f"\n[{i}/{len(track_items)}] {item.audio_path.name} + "
-            f"{item.image_path.name} -> {item.output_filename}"
-        )
-        try:
-            result = encode_video(
-                image_path=item.image_path,
-                audio_path=item.audio_path,
-                output_path=out_path,
-                quality=quality,
+    skipped: list[Path] = []
+    track_results: list[TrackResult] = []
+
+    if max_workers > 1 and not dry_run:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        logger.info("Parallel encoding with %d worker(s)", max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _encode_single_track, item, output_dir, quality, blur_bg, dry_run, skip_existing, normalize, title, generate_thumbnail, retry
+                ): item
+                for item in track_items
+            }
+            for future in as_completed(futures):
+                success_path, failure, tr = future.result()
+                track_results.append(tr)
+                if success_path:
+                    successes.append(success_path)
+                    if tr.status == "skipped":
+                        skipped.append(success_path)
+                if failure:
+                    encode_failures.append(failure)
+    else:
+        for item in track_items:
+            success_path, failure, tr = _encode_single_track(
+                item, output_dir, quality, blur_bg, dry_run, skip_existing, normalize, title, generate_thumbnail, retry,
             )
-            successes.append(result)
-        except (RuntimeError, ValueError) as exc:
-            print(f"  SKIP: {exc}", file=sys.stderr)
-            encode_failures.append((item.audio_path, str(exc)))
+            track_results.append(tr)
+            if success_path:
+                successes.append(success_path)
+                if tr.status == "skipped":
+                    skipped.append(output_dir / item.output_filename)
+            if failure:
+                encode_failures.append(failure)
 
-    print("-" * 50)
+    logger.info("-" * 50)
     total = len(track_items) + len(pre_failures)
-    print(f"Batch complete: {len(successes)}/{total} video(s) generated.")
+    logger.info("Batch complete: %d/%d video(s) generated.", len(successes), total)
+    if skipped:
+        logger.info("Skipped (already encoded): %d file(s)", len(skipped))
     if encode_failures:
-        print(f"Failed: {len(encode_failures)} file(s)", file=sys.stderr)
+        logger.warning("Failed: %d file(s)", len(encode_failures))
         for failed_path, err in encode_failures:
-            print(f"  - {failed_path.name}: {err}", file=sys.stderr)
+            logger.warning("  - %s: %s", failed_path.name, err)
 
-    return BatchResult(successes=successes, failures=encode_failures)
+    # Summary table
+    if track_results:
+        _print_batch_summary(track_results)
+
+    return BatchResult(successes=successes, failures=encode_failures, track_results=track_results)

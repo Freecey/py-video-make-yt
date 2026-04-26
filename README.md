@@ -9,8 +9,18 @@ Typical use case: publish music clips, podcasts, or tracks on YouTube without vi
 - **Single mode** — encode one video from an image + audio file
 - **Batch mode** — encode an entire album folder in one command
 - **Quality presets** — 1080p and 4K, YouTube-recommended settings
-- **Smart image processing** — automatic resize with letterboxing (no distortion, black bars fill the rest)
-- **Override controls** — custom resolution, bitrate, framerate
+- **Smart image processing** — automatic resize with letterboxing; empty areas filled with a blurred cover-scaled version of the same image (no black bars by default)
+- **Audio normalization** — EBU R128 loudness standard for YouTube (`--normalize`)
+- **Text overlay** — add title text centered near bottom (`--title`)
+- **Thumbnail generation** — 1280x720 JPEG alongside each video (`--thumbnail`)
+- **Parallel batch encoding** — multi-threaded batch with `-j/--jobs`
+- **Skip existing** — skip already-encoded files (`--skip-existing`)
+- **Auto-retry** — retries once with ultrafast preset on failure
+- **Config file** — `~/.video-maker.toml` for default settings
+- **Dry-run mode** — preview commands without running ffmpeg (`--dry-run`)
+- **Disk space check** — verifies free space before batch encoding
+- **Progress bar** — visual `[=====>    ] 45%` encoding progress
+- **Batch summary** — per-track timing and size table after batch encoding
 - **Zero external frameworks** — pure Python + ffmpeg subprocess
 
 ## Prerequisites
@@ -32,10 +42,10 @@ brew install ffmpeg
 git clone <repo-url> && cd video-maker-auto
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
-For development (includes pytest):
+For development (includes pytest, ruff, mypy, pytest-cov):
 
 ```bash
 pip install -e ".[dev]"
@@ -52,6 +62,12 @@ python -m video_maker single -i cover.jpg -a track.mp3 -q 4k
 
 # Custom output path
 python -m video_maker single -i artwork.png -a podcast.wav -o my_video.mp4
+
+# With audio normalization and text overlay
+python -m video_maker single -i cover.jpg -a track.mp3 --normalize --title "My Song"
+
+# Generate a thumbnail too
+python -m video_maker single -i cover.jpg -a track.mp3 --thumbnail
 ```
 
 ### Batch — encode a full album
@@ -67,7 +83,17 @@ my_album/
 ```
 
 ```bash
+# Encode all tracks
 python -m video_maker batch my_album/ -q 4k
+
+# Parallel encoding with 4 workers
+python -m video_maker batch my_album/ -j 4
+
+# Skip already encoded files
+python -m video_maker batch my_album/ --skip-existing
+
+# With normalization and thumbnails
+python -m video_maker batch my_album/ --normalize --thumbnail
 ```
 
 Output in `my_album/output/`:
@@ -75,20 +101,79 @@ Output in `my_album/output/`:
 ```
 output/
 ├── 01-intro.mp4
+├── 01-intro_thumbnail.jpg   (if --thumbnail)
 ├── 02-track.mp4
-└── 03-outro.mp4
+├── 02-track_thumbnail.jpg
+├── 03-outro.mp4
+└── 03-outro_thumbnail.jpg
 ```
 
-### All options
+### Dry-run (preview)
+
+```bash
+python -m video_maker --dry-run single -i cover.jpg -a track.mp3
+python -m video_maker --dry-run batch my_album/
+```
+
+## Configuration
+
+Create `~/.video-maker.toml` to set defaults (CLI flags always override):
+
+```toml
+[video-maker]
+quality = "4k"
+blur_bg = false
+normalize = true
+title = "My Album"
+```
+
+Or use a flat format (without the `[video-maker]` section):
+
+```toml
+quality = "4k"
+normalize = true
+```
+
+## All options
+
+### Global flags
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `-v`, `--verbose` | Show debug output (full ffmpeg stderr) | off |
+| `--config` | Path to config file | `~/.video-maker.toml` |
+| `--dry-run` | Preview commands without running ffmpeg | off |
+
+### Single mode
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-i`, `--image` | Path to image file | required |
+| `-a`, `--audio` | Path to audio file | required |
+| `-o`, `--output` | Output video path | `<audio_name>.mp4` |
 | `-q`, `--quality` | Preset: `1080p` or `4k` | `1080p` |
-| `-o`, `--output` | Output file/folder path | auto |
 | `--resolution` | Override resolution (`WxH`) | from preset |
 | `--bitrate` | Override video bitrate | from preset |
 | `--fps` | Override framerate | from preset |
-| `--cover-name` | Cover filename stem (batch only) | `cover` |
+| `--no-blur-bg` | Plain black letterbox instead of blurred background | off (blur on) |
+| `--normalize` | Normalize audio (EBU R128 / YouTube standard) | off |
+| `--title` | Overlay text (centered, near bottom) | none |
+| `--thumbnail` | Generate 1280x720 thumbnail JPEG | off |
+
+### Batch mode
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `input_dir` | Folder with audio files | required |
+| `-o`, `--output-dir` | Output folder | `<input_dir>/output` |
+| `-q`, `--quality` | Preset: `1080p` or `4k` | `1080p` |
+| `--cover-name` | Cover filename stem | `cover` |
+| `--no-blur-bg` | Plain black letterbox | off (blur on) |
+| `--skip-existing` | Skip if output is newer than source | off |
+| `-j`, `--jobs` | Parallel encoding workers | `1` (sequential) |
+| `--normalize` | Normalize audio (EBU R128) | off |
+| `--title` | Overlay text on all videos | none |
+| `--thumbnail` | Generate thumbnails | off |
 
 ## Quality presets
 
@@ -117,8 +202,14 @@ output/
 ## Run tests
 
 ```bash
-source .venv/bin/activate
+# Unit tests
 python -m pytest tests/ -v
+
+# Integration tests (requires real ffmpeg)
+python -m pytest tests/ -m integration -v
+
+# Coverage report (threshold: 80%)
+make test-cov
 ```
 
 ## License
