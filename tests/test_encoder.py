@@ -46,9 +46,25 @@ def test_resolve_quality_invalid() -> None:
         resolve_quality("720p")
 
 
+def test_resolve_quality_shorts() -> None:
+    preset = resolve_quality("shorts")
+    assert preset.resolution == (1080, 1920)
+    assert preset.video_bitrate == "8M"
+    assert preset.frame_rate == 30
+
+
+def test_resolve_quality_shorts4k() -> None:
+    preset = resolve_quality("shorts4k")
+    assert preset.resolution == (2160, 3840)
+    assert preset.video_bitrate == "35M"
+    assert preset.frame_rate == 30
+
+
 def test_resolve_quality_case_insensitive() -> None:
     assert resolve_quality("1080P").resolution == (1920, 1080)
     assert resolve_quality("4K").resolution == (3840, 2160)
+    assert resolve_quality("SHORTS").resolution == (1080, 1920)
+    assert resolve_quality("Shorts4K").resolution == (2160, 3840)
 
 
 # --- validate_inputs ---
@@ -130,8 +146,26 @@ def test_prepare_image_4k_resolution(tmp_path: Path) -> None:
     path = tmp_path / "small.png"
     img.save(path)
     result = _prepare_image(path, tmp_path, (3840, 2160))
+
+
+def test_prepare_image_shorts_portrait(tmp_path: Path) -> None:
+    """Portrait 9:16 image must be correctly padded to shorts resolution."""
+    img = Image.new("RGB", (1080, 1920), (50, 50, 50))
+    path = tmp_path / "portrait.png"
+    img.save(path)
+    result = _prepare_image(path, tmp_path, (1080, 1920))
+    assert result == path  # already exact size
+
+
+def test_prepare_image_landscape_to_shorts(tmp_path: Path) -> None:
+    """Landscape image must be letterboxed into 9:16 shorts resolution."""
+    img = Image.new("RGB", (1920, 1080), (0, 100, 200))
+    path = tmp_path / "landscape.png"
+    img.save(path)
+    result = _prepare_image(path, tmp_path, (1080, 1920))
+    assert result != path
     prepared = Image.open(result)
-    assert prepared.size == (3840, 2160)
+    assert prepared.size == (1080, 1920)
 
 
 def test_prepare_image_corrupt_raises(tmp_path: Path, tmp_audio: Path) -> None:
@@ -255,6 +289,17 @@ def test_encode_video_4k(tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_
     assert "35M" in cmd
 
 
+def test_encode_video_shorts(tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock) -> None:
+    output = tmp_path / "output_shorts.mp4"
+
+    with patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_ok) as mock_popen, \
+         patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
+        encode_video(tmp_image, tmp_audio, output, quality="shorts")
+
+    cmd = mock_popen.call_args[0][0]
+    assert "8M" in cmd  # shorts uses 8M bitrate like 1080p
+
+
 def test_encode_video_ffmpeg_fails(tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_fail: MagicMock) -> None:
     output = tmp_path / "fail.mp4"
 
@@ -297,6 +342,19 @@ def test_batch_encode_success(batch_dir: Path, tmp_path: Path, mock_ffmpeg_ok: M
     for path in result.successes:
         assert path.suffix == ".mp4"
         assert output_dir in path.parents
+
+
+def test_batch_encode_shorts(batch_dir: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock) -> None:
+    """Batch encoding with shorts quality must produce vertical video paths."""
+    output_dir = tmp_path / "shorts_out"
+
+    with patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_ok) as mock_popen, \
+         patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
+        result = batch_encode(batch_dir, output_dir, quality="shorts")
+
+    assert len(result.successes) == 3
+    cmd = mock_popen.call_args[0][0]
+    assert "8M" in cmd
 
 
 def test_batch_encode_no_cover(tmp_path: Path) -> None:

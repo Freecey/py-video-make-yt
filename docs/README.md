@@ -49,6 +49,12 @@ python -m video_maker single -i cover.jpg -a song.mp3 -q 1080p
 
 # 4K Ultra HD
 python -m video_maker single -i cover.jpg -a song.mp3 -q 4k
+
+# YouTube Shorts (vertical 9:16)
+python -m video_maker single -i cover.jpg -a song.mp3 -q shorts
+
+# YouTube Shorts en 4K
+python -m video_maker single -i cover.jpg -a song.mp3 -q shorts4k
 ```
 
 ### Preciser le fichier de sortie
@@ -263,7 +269,7 @@ python -m video_maker --dry-run batch mon_album/
 
 ## Ce que fait l'outil avec votre image
 
-L'image est **automatiquement redimensionnee** pour correspondre a la resolution choisie (1920x1080 ou 3840x2160) :
+L'image est **automatiquement redimensionnee** pour correspondre a la resolution choisie (1920x1080, 3840x2160, 1080x1920 pour Shorts, ou 2160x3840 pour Shorts 4K) :
 
 - Le **ratio de l'image est toujours preserve** (pas de deformation)
 - L'image est **centree** sur le canvas
@@ -328,7 +334,7 @@ python -m video_maker --config /chemin/vers/maconfig.toml single -i cover.jpg -a
 | `-i`, `--image` | Chemin vers l'image | obligatoire |
 | `-a`, `--audio` | Chemin vers le fichier audio | obligatoire |
 | `-o`, `--output` | Chemin de la video de sortie | `<nom_audio>.mp4` |
-| `-q`, `--quality` | Preset : `1080p` ou `4k` | `1080p` |
+| `-q`, `--quality` | Preset : `1080p`, `4k`, `shorts`, `shorts4k` | `1080p` |
 | `--resolution` | Resolution personnalisee (`WxH`) | du preset |
 | `--bitrate` | Bitrate video personnalise | du preset |
 | `--fps` | Framerate personnalise | du preset |
@@ -343,7 +349,7 @@ python -m video_maker --config /chemin/vers/maconfig.toml single -i cover.jpg -a
 |------|-------------|--------|
 | `input_dir` | Dossier avec les fichiers audio | obligatoire |
 | `-o`, `--output-dir` | Dossier de sortie | `<input_dir>/output` |
-| `-q`, `--quality` | Preset : `1080p` ou `4k` | `1080p` |
+| `-q`, `--quality` | Preset : `1080p`, `4k`, `shorts`, `shorts4k` | `1080p` |
 | `--cover-name` | Nom du fichier couverture (sans extension) | `cover` |
 | `--no-blur-bg` | Bandes noires | desactive (blur on) |
 | `--skip-existing` | Ignorer les fichiers deja encodes | desactive |

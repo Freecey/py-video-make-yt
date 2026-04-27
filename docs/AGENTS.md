@@ -128,7 +128,7 @@ Types :
 
 - `QualityPreset` : frozen dataclass avec `resolution`, `video_bitrate`, `frame_rate`.
 - `EncodingSettings` : frozen dataclass avec les parametres codec (`video_codec`, `audio_codec`, `audio_bitrate`, `audio_sample_rate`, `audio_channels`, `profile`, `preset`, `pix_fmt`, `movflags`).
-- `QUALITY_PRESETS` : dictionnaire de presets (`"1080p"`, `"4k"`).
+- `QUALITY_PRESETS` : dictionnaire de presets (`"1080p"`, `"4k"`, `"shorts"`, `"shorts4k"`).
 - `ENCODING_SETTINGS` : instance unique de `EncodingSettings`. Cles notables : `preset: "slow"` (encodage lent/haute qualite) et l'option ffmpeg `-tune stillimage` (optimisation pour image fixe). Modifier `preset` vers `"medium"` ou `"fast"` reduit le temps d'encodage au detriment du ratio qualite/taille.
 - `BLUR_BACKGROUND_RADIUS` : rayon du flou Gaussian applique au fond (`int`, defaut `40`).
 - `SUPPORTED_*_EXTENSIONS` : sets d'extensions valides.
@@ -148,7 +148,7 @@ Pour ajouter une nouvelle qualite (ex. 1440p), ajouter une entree dans `QUALITY_
 ### Encoder (`encoder.py`)
 
 - `check_ffmpeg_available()` : verifie ffmpeg installe + codecs requis (libx264, aac). Resultat cache via `lru_cache`. Leve `RuntimeError` si absent.
-- `resolve_quality()` : retourne un `QualityPreset`. Leve `ValueError` si inconnu. Insensible a la casse (`"1080P"`, `"4K"` acceptes). Attention : la CLI utilise `argparse choices` qui est case-sensitive ; seuls `"1080p"` et `"4k"` sont acceptes en ligne de commande.
+- `resolve_quality()` : retourne un `QualityPreset`. Leve `ValueError` si inconnu. Insensible a la casse (`"1080P"`, `"4K"`, `"SHORTS"` acceptes). Attention : la CLI utilise `argparse choices` qui est case-sensitive ; seuls les presets en minuscules sont acceptes en ligne de commande.
 - `validate_inputs()` : utilise `is_file()` (rejette les dossiers, les symlinks casses, les fichiers absents). Leve `FileNotFoundError` si absent, `ValueError` si c'est un dossier ou une extension non supportee.
 - `_prepare_image(path, work_dir, resolution, blur_bg=True)` : retourne le chemin de l'image preparee. Si deja a la bonne taille, retourne le chemin original sans modification. Sinon, applique un **contain** (ratio preserve, centree) sur un fond : floute si `blur_bg=True` (cover-scale + `GaussianBlur(radius=BLUR_BACKGROUND_RADIUS)`), noir si `blur_bg=False`. Leve `ValueError` pour dimensions nulles (`0x0`). Les erreurs PIL (`UnidentifiedImageError`, `OSError`) sont capturees dans `encode_video()` et converties en `ValueError("Cannot read image ...")`.
 - `encode_video()` : accepte `quality` (str) OU des overrides manuels (`resolution`, `video_bitrate`, `frame_rate`). Les overrides ont priorite sur le preset. Parametres : `blur_bg`, `dry_run`, `normalize`, `title`, `generate_thumbnail`, `_preset_override` (interne, pour retry).
@@ -188,11 +188,11 @@ Pour ajouter une nouvelle qualite (ex. 1440p), ajouter une entree dans `QUALITY_
 ### Tests
 
 - `tests/conftest.py` : fixtures partagees (`tmp_image`, `tmp_audio`, `batch_dir`) + autouse fixtures (`mock_get_audio_duration`, `mock_check_ffmpeg`).
-- `tests/test_encoder.py` : ~95 tests unitaires couvrant validation, preparation image, encodage (ffmpeg mocke via `subprocess.Popen`), batch, normalisation, texte overlay, miniatures, retry, progres, resume, espace disque.
+- `tests/test_encoder.py` : ~100 tests unitaires couvrant validation, preparation image, encodage (ffmpeg mocke via `subprocess.Popen`), batch, normalisation, texte overlay, miniatures, retry, progres, resume, espace disque, presets shorts.
 - `tests/test_cli.py` : ~27 tests du parsing CLI, `_parse_resolution`, retours de `main()` (single/batch/help, cas d'erreur, flags).
 - `tests/test_config.py` : 9 tests — chargement TOML (fichier manquant, valide, invalide, chemin custom, format plat), application config (normalize, title, blur_bg), override CLI vs config.
 - `tests/test_integration.py` : 3 tests d'integration avec vrai ffmpeg (marque `@pytest.mark.integration`).
-- **Total** : ~117 tests unitaires + 3 integration, coverage ~90%.
+- **Total** : ~122 tests unitaires + 3 integration, coverage ~90%.
 - ffmpeg est toujours mocke dans les tests unitaires via `unittest.mock.patch`.
 - `pytest.ini` (pyproject.toml) : `addopts = "-m 'not integration'"` — les tests integration ne tournent pas par defaut.
 - Coverage threshold : 80% (CI et `make test-cov`).

@@ -42,6 +42,16 @@ QUALITY_PRESETS: dict[str, QualityPreset] = {
         video_bitrate="35M",
         frame_rate=30,
     ),
+    "shorts": QualityPreset(
+        resolution=(1080, 1920),
+        video_bitrate="8M",
+        frame_rate=30,
+    ),
+    "shorts4k": QualityPreset(
+        resolution=(2160, 3840),
+        video_bitrate="35M",
+        frame_rate=30,
+    ),
 }
 
 # Blurred background: Gaussian blur radius applied to the cover-scaled background image.

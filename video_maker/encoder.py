@@ -653,8 +653,7 @@ def _print_batch_summary(track_results: list[TrackResult]) -> None:
 def _estimate_batch_size(track_items: list[TrackItem], preset: QualityPreset) -> int:
     """Rough estimate of total output size in bytes.
 
-    Uses a heuristic: video_bitrate * average_audio_duration_estimate.
-    Falls back to 50 MB per track if duration cannot be estimated.
+    Uses a heuristic: video_bitrate * assumed 4-minute average per track.
     """
     # Parse bitrate string (e.g. "8M" -> 8_000_000)
     vbr_str = preset.video_bitrate.upper()

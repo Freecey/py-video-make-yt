@@ -8,7 +8,7 @@ Typical use case: publish music clips, podcasts, or tracks on YouTube without vi
 
 - **Single mode** — encode one video from an image + audio file
 - **Batch mode** — encode an entire album folder in one command
-- **Quality presets** — 1080p and 4K, YouTube-recommended settings
+- **Quality presets** — 1080p, 4K, YouTube Shorts (vertical 9:16), and Shorts 4K
 - **Smart image processing** — automatic resize with letterboxing; empty areas filled with a blurred cover-scaled version of the same image (no black bars by default)
 - **Audio normalization** — EBU R128 loudness standard for YouTube (`--normalize`)
 - **Text overlay** — add title text centered near bottom (`--title`)
@@ -59,6 +59,9 @@ python -m video_maker single -i cover.jpg -a track.mp3
 
 # One video in 4K
 python -m video_maker single -i cover.jpg -a track.mp3 -q 4k
+
+# YouTube Shorts (vertical 9:16)
+python -m video_maker single -i cover.jpg -a track.mp3 -q shorts
 
 # Custom output path
 python -m video_maker single -i artwork.png -a podcast.wav -o my_video.mp4
@@ -151,7 +154,7 @@ normalize = true
 | `-i`, `--image` | Path to image file | required |
 | `-a`, `--audio` | Path to audio file | required |
 | `-o`, `--output` | Output video path | `<audio_name>.mp4` |
-| `-q`, `--quality` | Preset: `1080p` or `4k` | `1080p` |
+| `-q`, `--quality` | Preset: `1080p`, `4k`, `shorts`, `shorts4k` | `1080p` |
 | `--resolution` | Override resolution (`WxH`) | from preset |
 | `--bitrate` | Override video bitrate | from preset |
 | `--fps` | Override framerate | from preset |
@@ -166,7 +169,7 @@ normalize = true
 |------|-------------|---------|
 | `input_dir` | Folder with audio files | required |
 | `-o`, `--output-dir` | Output folder | `<input_dir>/output` |
-| `-q`, `--quality` | Preset: `1080p` or `4k` | `1080p` |
+| `-q`, `--quality` | Preset: `1080p`, `4k`, `shorts`, `shorts4k` | `1080p` |
 | `--cover-name` | Cover filename stem | `cover` |
 | `--no-blur-bg` | Plain black letterbox | off (blur on) |
 | `--skip-existing` | Skip if output is newer than source | off |
@@ -177,10 +180,12 @@ normalize = true
 
 ## Quality presets
 
-| Preset | Resolution | Video bitrate | Framerate |
-|--------|-----------|--------------|-----------|
-| `1080p` | 1920x1080 | 8 Mbps | 30 fps |
-| `4k` | 3840x2160 | 35 Mbps | 30 fps |
+| Preset | Resolution | Aspect | Video bitrate | Framerate |
+|--------|-----------|--------|--------------|-----------|
+| `1080p` | 1920x1080 | 16:9 landscape | 8 Mbps | 30 fps |
+| `4k` | 3840x2160 | 16:9 landscape | 35 Mbps | 30 fps |
+| `shorts` | 1080x1920 | 9:16 vertical (YouTube Shorts) | 8 Mbps | 30 fps |
+| `shorts4k` | 2160x3840 | 9:16 vertical (YouTube Shorts) | 35 Mbps | 30 fps |
 
 ## Output specs (YouTube-optimized)
 

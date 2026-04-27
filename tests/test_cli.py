@@ -47,6 +47,16 @@ def test_parse_args_single_defaults() -> None:
     assert args.blur_bg is True
 
 
+def test_parse_args_single_shorts() -> None:
+    args = parse_args(["single", "-i", "img.png", "-a", "audio.wav", "-q", "shorts"])
+    assert args.quality == "shorts"
+
+
+def test_parse_args_single_shorts4k() -> None:
+    args = parse_args(["single", "-i", "img.png", "-a", "audio.wav", "-q", "shorts4k"])
+    assert args.quality == "shorts4k"
+
+
 def test_parse_args_batch_defaults() -> None:
     args = parse_args(["batch", "/some/dir"])
     assert args.quality == "1080p"
@@ -54,6 +64,11 @@ def test_parse_args_batch_defaults() -> None:
     assert args.output_dir is None
     assert args.blur_bg is True
     assert args.skip_existing is False
+
+
+def test_parse_args_batch_shorts() -> None:
+    args = parse_args(["batch", "/some/dir", "-q", "shorts"])
+    assert args.quality == "shorts"
 
 
 def test_parse_args_batch_skip_existing() -> None:
@@ -265,6 +280,24 @@ def test_main_single_no_blur_bg_propagates(
         ])
     assert ret == 0
     assert mock_prepare.call_args.kwargs.get("blur_bg") is False
+
+
+def test_main_single_shorts(
+    tmp_image: Path, tmp_audio: Path, tmp_path: Path, mock_ffmpeg_ok: MagicMock
+) -> None:
+    """main single with -q shorts must encode with shorts bitrate."""
+    with patch("video_maker.encoder.subprocess.Popen", return_value=mock_ffmpeg_ok) as mock_popen, \
+         patch("video_maker.encoder.shutil.which", return_value="/usr/bin/ffmpeg"):
+        ret = main([
+            "single",
+            "-i", str(tmp_image),
+            "-a", str(tmp_audio),
+            "-o", str(tmp_path / "out.mp4"),
+            "-q", "shorts",
+        ])
+    assert ret == 0
+    cmd = mock_popen.call_args[0][0]
+    assert "8M" in cmd
 
 
 # --- main: no subcommand ---

@@ -138,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     normalize = args.normalize or (config.normalize or False)
     title = args.title or config.title
     quality = args.quality if args.quality != "1080p" else (config.quality or args.quality)
+    if quality not in QUALITY_PRESETS:
+        quality = "1080p"
 
     if args.command == "batch":
         output_dir = args.output_dir or (
